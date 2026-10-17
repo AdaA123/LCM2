@@ -1,0 +1,28 @@
+#include "n32wb033.h"
+#include "led.h"
+#include "uart.h"
+#include "my_ble.h"
+#include "one_wire.h"
+#include "mytask.h"
+#include "yl1650.h"
+
+int main(void)
+{
+    System_Init();
+    Led_Init();
+    Uart_Init();
+    OneWire_Init();
+    My_Ble_Init();
+    /* ---------- 先启动1ms系统节拍，再初始化依赖时基的数码管模块 ---------- */
+    TaskStart();        /* GTIM1硬件中断，提供全局1ms时基 */
+    YL1650_Init();      /* 注册数码管引擎/读写任务，顺序不可提前 */
+
+    while(1)
+    {
+        My_Ble_Run();
+        TaskRun();      /* 运行所有 TaskAdd 注册的定时任务 */
+    }
+}
+
+void app_sleep_prepare_proc(void) { }
+void app_sleep_resume_proc(void)  { }

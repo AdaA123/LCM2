@@ -1,0 +1,568 @@
+//升级逻辑在这里
+
+#include "update.h"
+#include "sys_platform.h"
+#include "flash.h"
+#include "ns_log.h"
+#include "n32wb033.h"
+#include <string.h>
+
+#define FW_UPDATE_SUB_START         0x00u
+#define FW_UPDATE_SUB_DATA          0x01u
+#define FW_UPDATE_SUB_END           0x02u
+#define FW_UPDATE_INFO_OFFSET       0x1000u
+#define FW_UPDATE_LABEL_CODE        "YB-N32W-00000002"
+#define FW_UPDATE_PROJECT_NAME      "YB-002(65)"
+#define FW_UPDATE_BOOT_FLAG_ADDRESS SYS_DATA_A_ADDRESS
+#define FW_UPDATE_TICK_MS           100u
+#define FW_UPDATE_TIMEOUT_TICKS     24u
+#define FW_UPDATE_RETRY_TICKS       10u
+#define FW_UPDATE_RETRY_MAX         3u
+#define FW_UPDATE_RESET_DELAY_MS    2000u
+
+enum firmware_update_error
+{
+    UPD_ERR_TIMEOUT         = 0,			//超时
+    UPD_ERR_NOT_STARTED     = 1,            //没有开始指令
+    UPD_ERR_LENGTH          = 2,            //长度超限
+    UPD_ERR_ADDRESS         = 3,            //地址错误
+    UPD_ERR_LENGTH_MISMATCH = 4,            //两个长度错误
+    UPD_ERR_CRC_FRONT       = 5,            //前半部分CRC校验错误
+    UPD_ERR_CRC_AFTER       = 6,            //后半部分CRC校验错误
+    UPD_ERR_CRC_FILE        = 7,            //CRC校验错误
+    UPD_ERR_REQUEST         = 8,            //升级请求,当程序停留在BOOT时,需要发送升级请求
+    UPD_ERR_REPEATED        = 9,            //当前正在升级，又发送升级开始信号
+    UPD_ERR_TRANSPORT       = 10,           //当前正在升级，从其它端口发来的升级信号
+    UPD_ERR_FILE_SIZE       = 11,           //文件大小错误
+    UPD_ERR_NO_RESPONSE     = 12,           //多次传输无应答
+    UPD_ERR_BUSY            = 13,           //当前有其它设备正在升级
+    UPD_ERR_FILE            = 14,           //文件错误
+    UPD_ERR_UNKNOWN         = 15            //未知错误
+};
+
+
+
+typedef struct
+{
+    Byte  update_state;
+    Byte  port_number;//升级端口
+    UInt16 image_crc;//文件CRC
+    UInt32 image_length;//文件长度
+} firmware_update_boot_record_t;
+
+typedef char software_information_size_must_be_128[
+    (sizeof(software_information_t) == 128u) ? 1 : -1];
+typedef char update_boot_record_size_must_be_8[
+    (sizeof(firmware_update_boot_record_t) == 8u) ? 1 : -1];
+
+enum firmware_update_state
+{
+    UPD_STATE_IDLE = 0,
+    UPD_STATE_RECV,
+    UPD_STATE_DONE
+};
+
+typedef struct
+{
+    Byte   state;
+    Byte   success;
+    Byte   port;//升级端口
+    Byte   type;
+    Byte   over_time;//超时时间
+    Byte   err_count;//错误次数
+    UInt16  reset_count_ms;
+    UInt32  file_size;//文件大小
+    UInt32  point;//当前位置
+    upd_crc_t file_crc;//文件CRC
+    UInt32  erased_sector;
+} firmware_update_context_t;
+
+static firmware_update_context_t s_update =
+{
+    .state = UPD_STATE_IDLE,
+    .erased_sector = 0xFFFFFFFFu
+};
+static Byte  s_crc_table_ready;
+static UInt16 s_crc_table[256];
+
+const software_information_t SoftwareInformation
+__attribute__((used))
+__attribute__((at(APP_ADDRESS + FW_UPDATE_INFO_OFFSET))) =
+{
+    .complete_state = 1u,
+    .label_code = FW_UPDATE_LABEL_CODE,
+    .project_name = FW_UPDATE_PROJECT_NAME,
+    .build_time = __TIME__,
+    .build_date = __DATE__,
+    .version = "V01.21",
+};
+
+static firmware_update_send_t s_update_sender;
+
+void FirmwareUpdate_SendBind(firmware_update_send_t sender)
+{
+    s_update_sender = sender;
+}
+
+static void firmware_update_crc_table_init(void)
+{
+    UInt16 index;
+    UInt16 bit;
+
+    for (index = 0u; index < 256u; index++)
+    {
+        UInt16 crc = index;
+
+        for (bit = 0u; bit < 8u; bit++)
+        {
+            crc = ((crc & 1u) != 0u) ?
+                  (UInt16)((crc >> 1) ^ 0xA001u) :
+                  (UInt16)(crc >> 1);
+        }
+
+        s_crc_table[index] = crc;
+    }
+
+    s_crc_table_ready = 1u;
+}
+
+static UInt16 firmware_image_crc16(const Byte *data, UInt32 length)
+{
+    UInt16 crc = 0xFFFFu;
+
+    if (s_crc_table_ready == 0u)
+        firmware_update_crc_table_init();
+
+    while (length-- != 0u)
+    {
+        crc = (UInt16)((crc >> 8) ^
+                         s_crc_table[(Byte)(crc ^ *data++)]);
+    }
+
+    return crc;
+}
+
+static int firmware_update_reply(const Byte *data, UInt16 length)
+{
+    if (s_update_sender == 0)
+        return -1;
+
+    return s_update_sender(s_update.port, s_update.type, data, length);
+}
+
+static void firmware_update_send_point(Byte accepted)
+{
+    Byte data[6];
+    data[0] = 1u;
+    data[1] = accepted;
+    data[2] = (Byte)(s_update.point >> 0);
+    data[3] = (Byte)(s_update.point >> 8);
+    data[4] = (Byte)(s_update.point >> 16);
+    data[5] = (Byte)(s_update.point >> 24);
+    (void)firmware_update_reply(data, sizeof(data));
+}
+
+static void firmware_update_send_error(Byte error, UInt32 parameter)
+{
+    Byte data[6];
+    data[0] = 2u;
+    data[1] = 0u;
+    data[2] = error;
+    data[3] = 0u;
+    data[4] = (Byte)(parameter >> 0);
+    data[5] = (Byte)(parameter >> 8);
+    (void)firmware_update_reply(data, sizeof(data));
+}
+
+static int firmware_update_send_success(void)
+{
+    const Byte data[6] = { 2u, 1u, 0u, 0u, 0u, 0u };
+    return firmware_update_reply(data, sizeof(data));
+}
+
+static int firmware_update_flash_prepare(UInt32 address)
+{
+    UInt32 sector = address & ~(N32WB033_FLASH_SECTOR - 1u);
+
+    if (sector != s_update.erased_sector)
+    {
+        if (Flash_Erase_Sector(sector) != 0u)
+            return -1;
+
+        s_update.erased_sector = sector;
+    }
+
+    return 0;
+}
+
+static int firmware_update_flash_write(UInt32 address,
+                                       const Byte *data,
+                                       UInt32 length)
+{
+    while (length != 0u)
+    {
+        UInt32 room = N32WB033_FLASH_SECTOR -
+                        (address % N32WB033_FLASH_SECTOR);
+        UInt32 write_length = (room < length) ? room : length;
+
+        if (write_length == 0u)
+            write_length = length;
+
+        if ((firmware_update_flash_prepare(address) != 0) ||
+            (Flash_Write(address, data, write_length) != 0u))
+            return -1;
+
+        address += write_length;
+        data += write_length;
+        length -= write_length;
+    }
+
+    return 0;
+}
+
+static Byte firmware_update_image_header_is_valid(
+    const software_information_t *information)
+{
+    UInt32 rear_length;
+    UInt16 expected_crc;
+
+    if (information->image_length <
+        (FW_UPDATE_INFO_OFFSET + (UInt32)sizeof(*information)))
+        return 0u;
+
+    expected_crc = (UInt16)(((UInt16)information->crc_front.high << 8) |
+                              information->crc_front.low);
+
+    if (firmware_image_crc16((const Byte *)APP_BKP_ADDRESS,
+                             FW_UPDATE_INFO_OFFSET) != expected_crc)
+        return 0u;
+
+    rear_length = information->image_length - FW_UPDATE_INFO_OFFSET -
+                  (UInt32)sizeof(*information);
+    expected_crc = (UInt16)(((UInt16)information->crc_after.high << 8) |
+                              information->crc_after.low);
+
+    if (firmware_image_crc16(
+            (const Byte *)APP_BKP_ADDRESS + FW_UPDATE_INFO_OFFSET +
+            sizeof(*information), rear_length) != expected_crc)
+        return 0u;
+
+    return 1u;
+}
+
+static int firmware_update_boot_flag_set(void)
+{
+    firmware_update_boot_record_t record;
+    memset(&record, 0, sizeof(record));
+    record.update_state = 1u;
+    record.image_crc = (UInt16)(((UInt16)s_update.file_crc.high << 8) |
+                                  s_update.file_crc.low);
+    record.image_length = s_update.file_size;
+
+    /* A is a System copy in normal operation; preserve the newest System in B first. */
+    if ((EEPROM_PrepareUpgrade() != 0) ||
+        (Flash_Erase_Sector(FW_UPDATE_BOOT_FLAG_ADDRESS) != 0u) ||
+        (Flash_Write(FW_UPDATE_BOOT_FLAG_ADDRESS,
+                     (const Byte *)&record,
+                     (UInt32)sizeof(record)) != 0u) ||
+        (memcmp((const void *)FW_UPDATE_BOOT_FLAG_ADDRESS,
+                &record, sizeof(record)) != 0))
+        return -1;
+
+    NS_LOG_INFO("[UPD] boot flag set @0x%08X: state=%u len=%u crc=0x%04X\r\n",
+                (unsigned)FW_UPDATE_BOOT_FLAG_ADDRESS,
+                (unsigned)record.update_state,
+                (unsigned)record.image_length,
+                (unsigned)record.image_crc);
+    return 0;
+}
+
+static void firmware_update_timer_start(void)
+{
+    (void)SysPlatform_TimerSet(FW_UPDATE_TIMER_MESSAGE_ID,
+                               FW_UPDATE_TICK_MS);
+}
+
+static void firmware_update_timer_stop(void)
+{
+    (void)SysPlatform_TimerClear(FW_UPDATE_TIMER_MESSAGE_ID);
+}
+
+static void firmware_update_abort_internal(Byte error)
+{
+    if (error != 0xFFu)
+        firmware_update_send_error(error, s_update.point);
+
+    firmware_update_timer_stop();
+    memset(&s_update, 0, sizeof(s_update));
+    s_update.erased_sector = 0xFFFFFFFFu;
+}
+
+static void firmware_update_start(const Byte *data, UInt16 length)
+{
+    UInt32 file_size;
+    upd_crc_t file_crc;
+
+    if (length == 6u)
+    {
+        const Byte reply[8] = { 0u, 0u, 0u, 0u, 1u, 54u, 0u, 0u };
+        (void)firmware_update_reply(reply, sizeof(reply));
+        return;
+    }
+
+    if (length < 24u)
+    {
+        firmware_update_send_error(UPD_ERR_LENGTH, 0u);
+        return;
+    }
+
+    if (s_update.state != UPD_STATE_IDLE)
+    {
+        firmware_update_send_error(UPD_ERR_REPEATED, 0u);
+        return;
+    }
+
+    file_size = (UInt32)data[2] | ((UInt32)data[3] << 8) |
+                ((UInt32)data[4] << 16) | ((UInt32)data[5] << 24);
+
+    if (file_size > APP_BKP_SIZE)
+    {
+        firmware_update_send_error(UPD_ERR_LENGTH, file_size);
+        return;
+    }
+
+    if (file_size <
+        (FW_UPDATE_INFO_OFFSET + (UInt32)sizeof(software_information_t)))
+    {
+        firmware_update_send_error(UPD_ERR_FILE, file_size);
+        return;
+    }
+
+    file_crc.low = data[6];
+    file_crc.high = data[7];
+
+    if (memcmp(&data[8], FW_UPDATE_LABEL_CODE, 16u) != 0)
+    {
+        firmware_update_send_error(UPD_ERR_FILE, file_size);
+        return;
+    }
+
+    s_update.state = UPD_STATE_RECV;
+    s_update.success = 0u;
+    s_update.file_size = file_size;
+    s_update.file_crc = file_crc;
+    s_update.point = 0u;
+    s_update.over_time = FW_UPDATE_TIMEOUT_TICKS;
+    s_update.err_count = 0u;
+    s_update.erased_sector = 0xFFFFFFFFu;
+    firmware_update_timer_start();
+    NS_LOG_INFO("[UPD] start: size=%u crc=%02X%02X\r\n",
+                (unsigned)file_size, (unsigned)file_crc.high,
+                (unsigned)file_crc.low);
+    firmware_update_send_point(1u);
+}
+
+static void firmware_update_data(const Byte *data, UInt16 length)
+{
+    UInt32 frame_point;
+    UInt32 payload_length;
+
+    if ((s_update.state != UPD_STATE_RECV) || (length < 6u))
+        return;
+
+    frame_point = (UInt32)data[2] | ((UInt32)data[3] << 8) |
+                  ((UInt32)data[4] << 16) | ((UInt32)data[5] << 24);
+    payload_length = (UInt32)(length - 6u);
+
+    if (frame_point < s_update.point)
+    {
+        firmware_update_send_point(1u);
+        return;
+    }
+
+    if ((payload_length == 0u) ||
+        (s_update.point >= s_update.file_size) ||
+        (frame_point != s_update.point) ||
+        (payload_length > (s_update.file_size - s_update.point)))
+        return;
+
+    if (firmware_update_flash_write(APP_BKP_ADDRESS + s_update.point,
+                                    &data[6], payload_length) != 0)
+    {
+        firmware_update_send_error(UPD_ERR_ADDRESS, s_update.point);
+        firmware_update_abort_internal(0xFFu);
+        return;
+    }
+
+    s_update.point += payload_length;
+    s_update.over_time = FW_UPDATE_TIMEOUT_TICKS;
+    s_update.err_count = 0u;
+    firmware_update_send_point(1u);
+}
+
+static void firmware_update_end(const Byte *data, UInt16 length)
+{
+    UInt16 image_crc;
+    upd_crc_t requested_crc;
+    const software_information_t *information;
+
+    if (s_update.state != UPD_STATE_RECV)
+        return;
+
+    if (length < 6u)
+    {
+        firmware_update_send_error(UPD_ERR_LENGTH, 0u);
+        return;
+    }
+	
+    if (s_update.point != s_update.file_size)
+    {
+        firmware_update_send_error(UPD_ERR_LENGTH_MISMATCH, s_update.point);
+        firmware_update_abort_internal(0xFFu);
+        return;
+    }
+	
+    requested_crc.low = data[4];
+    requested_crc.high = data[5];
+    image_crc = firmware_image_crc16((const Byte *)APP_BKP_ADDRESS, s_update.file_size);
+
+    if ((requested_crc.high != (Byte)(image_crc >> 8)) ||
+        (requested_crc.low != (Byte)(image_crc & 0xFFu)) ||
+        (requested_crc.high != s_update.file_crc.high) ||
+        (requested_crc.low != s_update.file_crc.low))
+    {
+        firmware_update_send_error(UPD_ERR_CRC_FILE, 0u);
+        firmware_update_abort_internal(0xFFu);
+        return;
+    }
+
+    information = (const software_information_t *)(APP_BKP_ADDRESS + FW_UPDATE_INFO_OFFSET);
+
+    if (memcmp((const void *)information->label_code,
+               FW_UPDATE_LABEL_CODE, 16u) == 0)
+    {
+        if ((information->image_length != s_update.file_size) ||
+            (firmware_update_image_header_is_valid(information) == 0u))
+        {
+            firmware_update_send_error(UPD_ERR_CRC_AFTER, 0u);
+            firmware_update_abort_internal(0xFFu);
+            return;
+        }
+    }
+	
+    if (firmware_update_boot_flag_set() != 0)
+    {
+        firmware_update_send_error(UPD_ERR_ADDRESS, FW_UPDATE_BOOT_FLAG_ADDRESS);
+        firmware_update_abort_internal(0xFFu);
+        return;
+    }
+
+    s_update.state = UPD_STATE_DONE;
+    s_update.reset_count_ms = FW_UPDATE_RESET_DELAY_MS;
+    s_update.success = (Byte)(firmware_update_send_success() == 0);
+    NS_LOG_INFO("[UPD] verify OK, reset in %u ms\r\n", (unsigned)FW_UPDATE_RESET_DELAY_MS);
+}
+
+/** @brief 处理协议层解析后的升级数据。 */
+void FirmwareUpdate_Handle(Byte port, Byte type, const Byte *data, UInt16 data_length)
+{
+    if ((data == 0) || (data_length == 0u))
+        return;
+
+    if (s_update.state != UPD_STATE_IDLE)
+    {
+        if (port != s_update.port)
+            return;
+    }
+    else
+        s_update.port = port;
+
+    s_update.type = type;
+
+    switch (data[0])
+    {
+        case FW_UPDATE_SUB_START:
+            firmware_update_start(data, data_length);
+            break;
+
+        case FW_UPDATE_SUB_DATA:
+            firmware_update_data(data, data_length);
+            break;
+
+        case FW_UPDATE_SUB_END:
+            firmware_update_end(data, data_length);
+            break;
+
+        default:
+            firmware_update_send_error(UPD_ERR_UNKNOWN, 0u);
+            break;
+    }
+}
+
+void FirmwareUpdate_Tick(void)
+{
+    if (s_update.state == UPD_STATE_DONE)
+    {
+        if (s_update.success == 0u)
+        {
+            s_update.success =
+                (Byte)(firmware_update_send_success() == 0);
+        }
+
+        if (s_update.reset_count_ms > FW_UPDATE_TICK_MS)
+        {
+            s_update.reset_count_ms =
+                (UInt16)(s_update.reset_count_ms - FW_UPDATE_TICK_MS);
+            firmware_update_timer_start();
+        }
+        else
+        {
+            NS_LOG_INFO("[UPD] reset now\r\n");
+            NVIC_SystemReset();
+        }
+
+        return;
+    }
+
+    if (s_update.state == UPD_STATE_RECV)
+    {
+        if (s_update.over_time != 0u)
+            s_update.over_time--;
+        else if (s_update.success == 0u)
+        {
+            s_update.err_count++;
+
+            if (s_update.err_count > FW_UPDATE_RETRY_MAX)
+            {
+                firmware_update_send_error(UPD_ERR_NO_RESPONSE, s_update.point);
+                firmware_update_abort_internal(0xFFu);
+                return;
+            }
+
+            firmware_update_send_point(0u);
+            s_update.over_time = FW_UPDATE_RETRY_TICKS;
+        }
+
+        firmware_update_timer_start();
+        return;
+    }
+
+    firmware_update_timer_stop();
+}
+
+Byte FirmwareUpdate_IsActive(void)
+{
+    return (s_update.state != UPD_STATE_IDLE) ? 1u : 0u;
+}
+
+void FirmwareUpdate_Abort(void)
+{
+    if (s_update.state != UPD_STATE_IDLE)
+        firmware_update_abort_internal(0xFFu);
+}
+
+void FirmwareUpdate_AbortPort(Byte port)
+{
+    if ((s_update.state == UPD_STATE_RECV) && (port == s_update.port))
+        FirmwareUpdate_Abort();
+}

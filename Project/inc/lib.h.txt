@@ -1,0 +1,84 @@
+#ifndef __LIB_H__
+#define __LIB_H__
+
+#include "type.h"	 
+
+typedef struct 
+{
+	char s1[32];
+	char s2[32];
+	char ch1;
+	char ch2;
+}_lib;
+extern _lib lib;
+
+UInt16 StringGetLenth(string s);  //获取字符串长度
+void StringCopy(char *s1,char *s2);  //字符串复制
+void StringInterception(string s1,UInt16 StartPoint,UInt16 num,string s2); //字符串截取
+void StringInterceptLength(string s1,string s2,UInt16 start,UInt16 end);  //字符串长度截取
+Byte StringComparison(char *str1,char *str2);   //字符比较相等返回0，大返回1，小返回2
+void StringMerge(char *str1,char *str2);  //字符串合并
+UInt16 StringFindOne(string s1,char ch);  //字符串查找
+UInt16 StringFindMany(string s1,string s2);  //字符串查找
+void StringInsertionOne(string s1,UInt16 position,char ch);   //插入一个字符
+void StringInsertionMany(string s1,UInt16 position,string s2);   //插入多个字符
+Boolean StringDeleteOne(string s1,char ch) ;   //字符删除
+Boolean StringDeleteMany(string s1,string s);  //字符串删除
+
+Boolean StringGetNum(string s1,string s2);   //从字符串中提取数字
+
+
+void NumberToString(int num,Byte seize_lenth,char str[]) ; //任意整数转字符串
+void FloatToString(float num,Byte lenth,char str[]); //小数转字符串
+
+void StringToLowercase(string s);       //字母小写
+void StringToUppercase(string s);               //字母大写
+Boolean StringGetNum(string s1,string s2);          //从字符串中提取数字
+Boolean StringGetAlphabetString(string s1,string s2);  //从字符串中提取字母字符串
+Boolean StringGetLowercase(string s1,string s2);      //从字符串中提取小写字母字符串
+Boolean StringGetUppercase(string s1,string s2);      //从字符串中提取大写字母字符串
+
+UInt32 MyAtoi(void *arg);
+
+void NumToHexString(UInt32 num,Byte mode,Byte seize_lenth,string s); //整形转字符串16进制,1转大小，0转小写
+void StringManyHexBytes(string s,byte buf[],UInt16 lenth);   //字符串转整形
+UInt32 StringHexToUint32(string s);   //字符串HEX转UINT形
+Int32 StringConverterToInt32(string s);       //字符串转INT形
+UInt32 StringToUint32(string s);      //字符串转UINT形
+float StringTofloat(string s);     //字符串转浮点形
+
+void ByteClear(void *p,UInt32 length,byte value); //字节清空
+void ByteCopy(byte *src,byte *dest,UInt16 num);     //字节复制
+Boolean ByteDeleteData(byte * buf,UInt16 lenth ,UInt16 star, UInt16 num); //删除数据
+Boolean ByteInsertData(byte* buf1,UInt16 lenth1,UInt16 position,byte* buf2,UInt16 lenth2); //插入数据
+UInt16 ByteFindData(byte* buf1, UInt16 size1, byte* buf2, UInt16 size2);  //查找缓存中的数据段
+byte ByteGetBuffString(byte *Buf,UInt16 lenth,string s,Boolean mode);       //获取数组中的字符
+
+
+Int16 GetInt16TypeMaxAndMinValue(byte mode, Int16 *buf, UInt16 length);  	//0最大值，1是最小值
+UInt16 GetUInt16TypeMaxAndMinValue(byte mode, UInt16 *buf, UInt16 length);  //0最大值，1是最小值
+UInt16 GetSByteTypeMaxAndMinValue(byte mode, SByte *buf, UInt16 length);    //0最大值，1是最小值
+void insertionSort(Byte arr[], int n, Byte arr2[]);
+
+void ByteFromSmallByte(Byte *arr, UInt32 len)  ;
+void ByteFromSmallBig(Byte *arr, UInt32 len) ; //Byte数据从大到小排列
+void UInt16FromSmallByte(UInt16 * array, UInt32 lenth);
+UInt32 AbsoluteValue(int parameter1,int parameter2);  //获取绝对值
+
+// 2. 插入排序（稳定，时间复杂度O(n2)，空间复杂度O(1)）
+// 核心思想：将未排序元素逐个插入到已排序序列的正确位置
+// 将arr中的数据有序复制到arr2中（从小到大），并记录原序号
+void Uint16InsertionSortSaveSerialNumber(UInt16 arr[48], int n, UInt16 arr2[2][48]);
+
+
+// 2. 插入排序（稳定，时间复杂度O(n2)，空间复杂度O(1)）
+// 核心思想：将未排序元素逐个插入到已排序序列的正确位置
+// 将arr中的数据有序复制到arr2中（从小到大）
+void Uint16InsertionSort(UInt16 arr[24], int n, UInt16 arr2[24]);
+UInt32 GainAverageData(UInt32 buf[],Byte num);  //求平均数
+void NullFun(void);
+void NullFun2(void *arg);
+
+#endif
+
+

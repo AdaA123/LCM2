@@ -1,0 +1,138 @@
+#ifndef __FLASH_H__
+#define __FLASH_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+#include "type.h"
+#define N32WB033_FLASH_BASE       (0x01002000UL)
+#define N32WB033_FLASH_SIZE       (508 * 1024UL)  /* 508KB */
+#define N32WB033_FLASH_END        (N32WB033_FLASH_BASE + N32WB033_FLASH_SIZE - 1UL)
+#define N32WB033_FLASH_SECTOR     (4096UL)        /* 4KB 扇区对齐 */
+
+
+#define FLASH_BASE_ADDRESS       	(0x1000000)                	            //APP基地址
+#define FLASH_PAGE_SIZE          	256                        		        //FLASH页大小
+#define FLASH_BLOCK_SIZE          	(4*1024)                                //FLASH页大小
+
+#define BOOT_ADDRESS             	(FLASH_BASE_ADDRESS)           	        //BOOT基地址
+#define BOOT_SIZE                	(8*1024)               			        //BOOT大小
+
+#define APP_ADDRESS              	(BOOT_ADDRESS+BOOT_SIZE) 		        //APP地址
+#define APP_SIZE                 	(220*1024)                   	        //APP大小
+
+#define APP_BKP_ADDRESS          	(APP_ADDRESS+APP_SIZE)     		        //备份区地址
+#define APP_BKP_SIZE             	(220*1024)						        //备分区大小
+
+#define LOG_DATA_ADDRESS		 	(APP_BKP_ADDRESS+(100*1024))	        //日志数据区地址
+#define LOG_DATA_SIZE			 	(100*1024)						        //日志数据区大小
+
+#define RES_ADDRESS 				(APP_BKP_ADDRESS+APP_BKP_SIZE)	        //预留空白地址
+#define RES_SIZE		    		(44*1024)                 	            //预留空白大小
+
+/* Read-only migration source for the previous display-mode record. */
+#define DISPLAY_MODE_ADDRESS         RES_ADDRESS
+#define DISPLAY_MODE_SIZE            N32WB033_FLASH_SECTOR
+
+#define BAT_DATA_A_ADDRESS    		(RES_ADDRESS+RES_SIZE)			        //电池数据A地址
+#define BAT_DATA_A_SIZE       		(4*1024)                 		        //电池数据A大小
+
+#define BAT_DATA_B_ADDRESS    		(BAT_DATA_A_ADDRESS+BAT_DATA_A_SIZE)    //电池数据B地址
+#define BAT_DATA_B_SIZE       		(4*1024)                  			    //电池数据B大小
+
+#define SYS_DATA_A_ADDRESS    		(BAT_DATA_B_ADDRESS+BAT_DATA_B_SIZE)    //系统数据A地址
+#define SYS_DATA_A_SIZE       		(4*1024)                 			    //数据A大小
+
+#define SYS_DATA_B_ADDRESS			(SYS_DATA_A_ADDRESS+SYS_DATA_A_SIZE)	//系统数据B地址
+#define SYS_DATA_B_SIZE 			(4*1024)                 				//系统数据B大小
+
+#define BLE_MODEL_ADDRESS    		(SYS_DATA_B_ADDRESS+SYS_DATA_B_SIZE)	//电池类型地址
+#define BLE_MODEL_SIZE       		(4*1024)                 				//电池类型大小
+
+/**
+ * @brief  读取 Flash 数据
+ * @param  addr 读取首地址
+ * @param  buf  数据接收缓冲区
+ * @param  len  读取长度 (字节)
+ */
+void Flash_Read(UInt32 addr, Byte *buf, UInt32 len);
+
+/**
+ * @brief  擦除 Flash 扇区 (4KB)
+ * @param  addr 待擦除扇区的起始地址
+ * @return 0:成功, 其他:失败
+ */
+UInt32 Flash_Erase_Sector(UInt32 addr);
+
+/**
+ * @brief  写入 Flash 数据 (Quad Page Program)
+ * @param  addr 写入首地址 (需预先擦除)
+ * @param  buf  待写入数据源
+ * @param  len  写入长度 (字节)
+ * @return 0:成功, 其他:失败
+ */
+UInt32 Flash_Write(UInt32 addr, const Byte *buf, UInt32 len);
+
+/* System configuration uses the existing A/B sectors; BLE_MODEL stays separate. */
+#define EEPROM_SAVE_MARK       0xB2DCD3EEu
+#define EEPROM_SYSTEM_VERSION  1u
+#define EEPROM_SYSTEM_LENGTH   512u
+#define FLASH_TARGET_MAGIC     0xA55A2026u
+
+typedef struct
+{
+    UInt32 magic;
+    Byte type;
+    Byte address_type;
+    Byte reserved[2];
+    Byte address_le[6];
+    char name[32];
+} FlashTargetType;
+
+typedef struct
+{
+    Byte UpDataState;
+    Byte ComNum;
+    UInt16 UpDataCrc;
+    UInt32 UpDataFileLength;
+    UInt16 Version;
+    UInt16 Length;
+    FlashTargetType Target;
+    Byte Reserved1[28];
+    Byte YbpModel;
+    Byte Reserved2[411];
+    UInt32 SaveTime;
+    UInt16 SaveCrc;
+    Byte Res9[2];
+    UInt32 SaveState;
+} SystemType;
+
+extern SystemType System;
+
+/* Init only reads. Save(0) commits now; Save(seconds) coalesces delayed writes. */
+void EEPROM_Init(void);
+Int16 EEPROM_Write(void);
+Int16 EEPROM_Save(UInt16 seconds);
+/* Preserve the latest complete System in B before the BOOT flag replaces A. */
+Int16 EEPROM_PrepareUpgrade(void);
+
+/* Invalid or empty records load as mode 1 (SOC); mode 2 is voltage. */
+Byte Flash_DisplayModeLoad(void);
+Int16 Flash_DisplayModeSave(Byte mode);
+
+#define FLASH_DEFERRED_SAVE_DELAY_MS 100u
+#define FLASH_DEFERRED_SAVE_RETRY_MS 1000u
+#define FLASH_DEFERRED_SAVE_RETRY_MAX 3u
+
+void Flash_DeferredSaveBind(Int16 (*writer)(void *), Byte (*busy)(void), void (*fault)(void *), void *context);
+void Flash_DeferredSaveRequest(UInt32 delay_ms);
+void Flash_DeferredSaveCancel(void);
+void Flash_DeferredSaveRetryIfExhausted(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __FLASH_H__ */

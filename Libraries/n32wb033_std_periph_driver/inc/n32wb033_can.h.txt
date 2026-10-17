@@ -1,0 +1,451 @@
+/**
+*     Copyright (c) 2026, Nsing Technologies Inc.
+*
+*     All rights reserved.
+*
+*     This software is the exclusive property of Nsing Technologies Inc. (Hereinafter
+* referred to as Nsing). This software, and the product of Nsing described herein
+* (Hereinafter referred to as the Product) are owned by Nsing under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     Nsing does not grant any license under its patents, copyrights, trademarks, or other
+* intellectual property rights. Names and brands of third party may be mentioned or referred
+* thereto (if any) for identification purposes only.
+*
+*     Nsing reserves the right to make changes, corrections, enhancements, modifications, and
+* improvements to this software at any time without notice. Please contact Nsing and obtain
+* the latest version of this software before placing orders.
+
+*     Although Nsing has attempted to provide accurate and reliable information, Nsing assumes
+* no responsibility for the accuracy and reliability of this software.
+*
+*     It is the responsibility of the user of this software to properly design, program, and test
+* the functionality and safety of any application made of this information and any resulting product.
+* In no event shall Nsing be liable for any direct, indirect, incidental, special,exemplary, or
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     Nsing Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify Nsing and hold Nsing
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by Nsing, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     Nsing products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations.
+* User shall comply with any applicable export control laws and regulations promulgated and administered by
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+/**
+*\*\file n32wb033_can.h
+*\*\author Nsing
+*\*\version v1.0.0
+*\*\copyright Copyright (c) 2026, Nsing Technologies Inc. All rights reserved.
+**/
+#ifndef __N32WB033_CAN_H__
+#define __N32WB033_CAN_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "n32wb033.h"
+
+
+/** CAN init structure definition **/
+typedef struct
+{
+    uint16_t BaudRatePrescaler; /* Specifies the length of a time quantum. */
+
+    uint8_t OperatingMode; /* Specifies the CAN operating mode. */
+
+    uint8_t RSJW; /* Specifies the maximum number of time quanta
+                          the CAN hardware is allowed to lengthen or
+                          shorten a bit to perform resynchronization. */
+
+    uint8_t TBS1; /* Specifies the number of time quanta in Bit Segment 1. */
+
+    uint8_t TBS2; /* Specifies the number of time quanta in Bit Segment 2. */
+
+    FunctionalState TTCM; /* Enable or disable the time triggered communication mode. */
+
+    FunctionalState ABOM; /* Enable or disable the automatic bus-off management. */
+
+    FunctionalState AWKUM; /* Enable or disable the automatic wake-up mode. */
+
+    FunctionalState NART; /* Enable or disable the no-automatic retransmission mode. */
+
+    FunctionalState RFLM; /* Enable or disable the Receive DATFIFO Locked mode. */
+
+    FunctionalState TXFP; /* Enable or disable the transmit DATFIFO priority. */
+} CAN_InitType;
+
+/** CAN filter init structure definition **/
+typedef struct
+{
+    uint16_t Filter_HighId; /* Specifies the filter identification number (MSBs for a 32-bit
+                                        configuration, first one for a 16-bit configuration). */
+
+    uint16_t Filter_LowId; /* Specifies the filter identification number (LSBs for a 32-bit
+                                       configuration, second one for a 16-bit configuration). */
+
+    uint16_t FilterMask_HighId; /* Specifies the filter mask number or identification number,
+                                            according to the mode (MSBs for a 32-bit configuration,
+                                            first one for a 16-bit configuration). */
+
+    uint16_t FilterMask_LowId; /* Specifies the filter mask number or identification number,
+                                           according to the mode (LSBs for a 32-bit configuration,
+                                           second one for a 16-bit configuration). */
+
+    uint16_t Filter_FIFOAssignment; /* Specifies the DATFIFO (0 or 1) which will be assigned to the filter. */
+
+    uint8_t Filter_Num; /* Specifies the filter which will be initialized. */
+
+    uint8_t Filter_Mode; /* Specifies the filter mode to be initialized. */
+
+    uint8_t Filter_Scale; /* Specifies the filter scale. */
+
+    FunctionalState Filter_Act; /* Enable or disable the filter. */
+} CAN_FilterInitType;
+
+/** CAN Tx message structure definition **/
+typedef struct
+{
+    uint32_t StdId; /* Specifies the standard identifier.
+                         This parameter can be a value between 0 to 0x7FF. */
+
+    uint32_t ExtId; /* Specifies the extended identifier.
+                         This parameter can be a value between 0 to 0x1FFFFFFF. */
+
+    uint8_t IDE; /* Specifies the type of identifier for the message that
+                      will be transmitted. This parameter can be a value
+                      of @ref CAN_identifier_type */
+
+    uint8_t RTR; /* Specifies the type of frame for the message that will
+                      be transmitted. This parameter can be a value of
+                      @ref CAN_remote_transmission_request */
+
+    uint8_t DLC; /* Specifies the length of the frame that will be
+                      transmitted. This parameter can be a value between
+                      0 to 8 */
+
+    uint8_t Data[8]; /* Contains the data to be transmitted. It ranges from 0
+                          to 0xFF. */
+} CanTxMessage;
+
+/**  CAN Rx message structure definition **/
+typedef struct
+{
+    uint32_t StdId; /* Specifies the standard identifier.
+                         This parameter can be a value between 0 to 0x7FF. */
+
+    uint32_t ExtId; /* Specifies the extended identifier.
+                         This parameter can be a value between 0 to 0x1FFFFFFF. */
+
+    uint8_t IDE; /* Specifies the type of identifier for the message that
+                      will be received. */
+
+    uint8_t RTR; /* Specifies the type of frame for the received message. */
+
+    uint8_t DLC; /* Specifies the length of the frame that will be received.
+                      This parameter can be a value between 0 to 8 */
+
+    uint8_t Data[8]; /* Contains the data to be received. It ranges from 0 to
+                          0xFF. */
+
+    uint8_t FMI; /* Specifies the index of the filter the message stored in
+                      the mailbox passes through. This parameter can be a
+                      value between 0 to 0xFF */
+} CanRxMessage;
+
+/** CAN_Init_Status **/
+#define CAN_InitSTS_Failed  ((uint8_t)0x00U) /* CAN initialization failed */
+#define CAN_InitSTS_Success ((uint8_t)0x01U) /* CAN initialization OK */
+
+/** CAN_Mode_Status **/
+#define CAN_ModeSTS_Failed  ((uint8_t)0x00U) /* CAN entering the specific mode failed */
+#define CAN_ModeSTS_Success ((uint8_t)0x01U) /* CAN entering the specific mode Succeed */
+
+/** CAN_sleep_constants **/
+#define CAN_SLEEP_Failed ((uint8_t)0x00U) /*!< CAN did not enter the sleep mode */
+#define CAN_SLEEP_Ok     ((uint8_t)0x01U) /*!< CAN entered the sleep mode */
+
+/** CAN_wake_up_constants **/
+#define CAN_WKU_Failed ((uint8_t)0x00U) /*!< CAN did not leave the sleep mode */
+#define CAN_WKU_Ok     ((uint8_t)0x01U) /*!< CAN leaved the sleep mode */
+
+typedef enum
+{
+    CAN_TxSTS_Failed = 0,       /* CAN transmission failed */
+    CAN_TxSTS_Ok,               /* CAN transmission succeeded */
+    CAN_TxSTS_Pending           /* CAN transmission pending */
+} CAN_Tx_Status;
+
+/** CAN Master Control Register bits **/
+#define MCTRL_DBGF           (CAN_MCTRL_DBGF)            /* Debug freeze */
+
+/** CAN Mailbox Transmit Request **/
+#define TMIDxR_TXRQ       (CAN_TMI0_TXRQ | CAN_TMI1_TXRQ) /* Transmit mailbox request */
+
+/** CAN Filter Master Register bits **/
+#define FMC_FINITM          (CAN_FMC_FINITM) /* Filter init mode */
+
+/** Time out for INAK bit */
+#define INIAK_TIMEOUT ((uint32_t)0x0000FFFFU)
+/** Time out for SLAK bit */
+#define SLPAK_TIMEOUT ((uint32_t)0x0000FFFFU)
+
+
+/** Mailboxes definition **/
+#define CAN_TXMAILBOX_0     ((uint8_t)0x00U) /* CAN transmit mailbox number 0 */
+#define CAN_TXMAILBOX_1     ((uint8_t)0x01U) /* CAN transmit mailbox number 1 */
+#define CAN_TXMAILBOX_2     ((uint8_t)0x02U) /* CAN transmit mailbox number 2 */
+#define CAN_TxSTS_NoMailBox ((uint8_t)0x04U) /* CAN cell did not provide an empty mailbox */
+
+#define CAN_MODE_MASK       (CAN_MSTS_INIAK | CAN_MSTS_SLPAK)
+
+/** OperatingMode **/
+#define CAN_Normal_Mode          ((uint8_t)0x00U) /* normal mode */
+#define CAN_LoopBack_Mode        ((uint8_t)0x01U) /* loopback mode */
+#define CAN_Silent_Mode          ((uint8_t)0x02U) /* silent mode */
+#define CAN_Silent_LoopBack_Mode ((uint8_t)0x03U) /* loopback combined with silent mode */
+
+/** CAN_operating_mode **/
+#define CAN_Operating_InitMode      ((uint8_t)0x00U) /* Initialization mode */
+#define CAN_Operating_NormalMode    ((uint8_t)0x01U) /* Normal mode */
+#define CAN_Operating_SleepMode     ((uint8_t)0x02U) /* sleep mode */
+
+/** CAN_synchronisation_jump_width **/
+#define CAN_RSJW_1tq        ((uint8_t)0x00U) /* 1 time quantum */
+#define CAN_RSJW_2tq        ((uint8_t)0x01U) /* 2 time quantum */
+#define CAN_RSJW_3tq        ((uint8_t)0x02U) /* 3 time quantum */
+#define CAN_RSJW_4tq        ((uint8_t)0x03U) /* 4 time quantum */
+
+/** CAN_time_quantum_in_bit_segment_1 **/
+#define CAN_TBS1_1tq  ((uint8_t)0x00U) /* 1 time quantum */
+#define CAN_TBS1_2tq  ((uint8_t)0x01U) /* 2 time quantum */
+#define CAN_TBS1_3tq  ((uint8_t)0x02U) /* 3 time quantum */
+#define CAN_TBS1_4tq  ((uint8_t)0x03U) /* 4 time quantum */
+#define CAN_TBS1_5tq  ((uint8_t)0x04U) /* 5 time quantum */
+#define CAN_TBS1_6tq  ((uint8_t)0x05U) /* 6 time quantum */
+#define CAN_TBS1_7tq  ((uint8_t)0x06U) /* 7 time quantum */
+#define CAN_TBS1_8tq  ((uint8_t)0x07U) /* 8 time quantum */
+#define CAN_TBS1_9tq  ((uint8_t)0x08U) /* 9 time quantum */
+#define CAN_TBS1_10tq ((uint8_t)0x09U) /* 10 time quantum */
+#define CAN_TBS1_11tq ((uint8_t)0x0AU) /* 11 time quantum */
+#define CAN_TBS1_12tq ((uint8_t)0x0BU) /* 12 time quantum */
+#define CAN_TBS1_13tq ((uint8_t)0x0CU) /* 13 time quantum */
+#define CAN_TBS1_14tq ((uint8_t)0x0DU) /* 14 time quantum */
+#define CAN_TBS1_15tq ((uint8_t)0x0EU) /* 15 time quantum */
+#define CAN_TBS1_16tq ((uint8_t)0x0FU) /* 16 time quantum */
+
+/** CAN_time_quantum_in_bit_segment_2 **/
+#define CAN_TBS2_1tq ((uint8_t)0x00U) /* 1 time quantum */
+#define CAN_TBS2_2tq ((uint8_t)0x01U) /* 2 time quantum */
+#define CAN_TBS2_3tq ((uint8_t)0x02U) /* 3 time quantum */
+#define CAN_TBS2_4tq ((uint8_t)0x03U) /* 4 time quantum */
+#define CAN_TBS2_5tq ((uint8_t)0x04U) /* 5 time quantum */
+#define CAN_TBS2_6tq ((uint8_t)0x05U) /* 6 time quantum */
+#define CAN_TBS2_7tq ((uint8_t)0x06U) /* 7 time quantum */
+#define CAN_TBS2_8tq ((uint8_t)0x07U) /* 8 time quantum */
+
+/** CAN_filter_mode **/
+#define CAN_Filter_IdMaskMode ((uint8_t)0x00U) /* identifier/mask mode */
+#define CAN_Filter_IdListMode ((uint8_t)0x01U) /* identifier list mode */
+
+/** CAN_filter_scale **/
+#define CAN_Filter_16bitScale ((uint8_t)0x00U) /* Two 16-bit filters */
+#define CAN_Filter_32bitScale ((uint8_t)0x01U) /* One 32-bit filter */
+
+/** CAN_filter_FIFO **/
+#define CAN_Filter_FIFO0            ((uint8_t)0x00U) /* Filter DATFIFO 0 assignment for filter x */
+#define CAN_Filter_FIFO1            ((uint8_t)0x01U) /* Filter DATFIFO 1 assignment for filter x */
+
+/** CAN_identifier_type **/
+#define CAN_Standard_Id         ((uint32_t)0x00000000U) /* Standard Id */
+#define CAN_Extended_Id         ((uint32_t)0x00000004U) /* Extended Id */
+
+/** CAN_remote_transmission_request **/
+#define CAN_RTRQ_Data    ((uint32_t)0x00000000U) /* Data frame */
+#define CAN_RTRQ_Remote  ((uint32_t)0x00000002U) /* Remote frame */
+
+/** CAN_receive_FIFO_number_constants **/
+#define CAN_FIFO0 ((uint8_t)0x00U) /* CAN DATFIFO 0 used to receive */
+#define CAN_FIFO1 ((uint8_t)0x01U) /* CAN DATFIFO 1 used to receive */
+
+/** CAN_Error_Code_constants **/
+#define CAN_ERRORCODE_NoErr           ((uint8_t)0x00U)                   /* No Error */
+#define CAN_ERRORCODE_StuffErr        (CAN_ESTS_LEC_0)                  /* Stuff Error */
+#define CAN_ERRORCODE_FormErr         (CAN_ESTS_LEC_1)                  /* Form Error */
+#define CAN_ERRORCODE_ACKErr          (CAN_ESTS_LEC_0 | CAN_ESTS_LEC_1) /* Acknowledgment Error */
+#define CAN_ERRORCODE_BitRecessiveErr (CAN_ESTS_LEC_2)                  /* Bit Recessive Error */
+#define CAN_ERRORCODE_BitDominantErr  (CAN_ESTS_LEC_0 | CAN_ESTS_LEC_2) /* Bit Dominant Error */
+#define CAN_ERRORCODE_CRCErr          (CAN_ESTS_LEC_1 | CAN_ESTS_LEC_2) /* CRC Error  */
+#define CAN_ERRORCODE_SoftwareSetErr  (CAN_ESTS_LEC)                    /* Software Set Error */
+
+#define CAN_TX_ERROR_COUNT            (CAN_ESTS_TXEC) /* Least significant byte of the 9-bit Transmit Error Counter */
+#define CAN_RX_ERROR_COUNT            (CAN_ESTS_RXEC) /* Receive Error Counter */
+
+#define CAN_ERROR_WARN_FLAG (CAN_ESTS_EWGFL) /* Error Warning Flag */
+#define CAN_ERROR_PASS_FLAG (CAN_ESTS_EPVFL) /* Error Passive Flag */
+#define CAN_BUS_OFF_FLAG    (CAN_ESTS_BOFFL) /* Bus-Off Flag */
+
+/** CAN_flags **/
+/** If the flag is 0x3XXXXXXX, it means that it can be used with CAN_GetFlagSTS()
+   and CAN_ClearFlag() functions. **/
+/** If the flag is 0x1XXXXXXX, it means that it can only be used with CAN_GetFlagSTS() function.  **/
+
+#define CAN_FLAG_MASK   ((uint32_t)0x000FFFFFU)
+
+/** Transmit Flags **/
+#define CAN_FLAG_RQCPM0 ((uint32_t)0x38000001U) /* Request MailBox0 Flag */
+#define CAN_FLAG_RQCPM1 ((uint32_t)0x38000100U) /* Request MailBox1 Flag */
+#define CAN_FLAG_RQCPM2 ((uint32_t)0x38010000U) /* Request MailBox2 Flag */
+
+/** Receive Flags **/
+#define CAN_FLAG_FFMP0  ((uint32_t)0x12000003U) /* DATFIFO 0 Message Pending Flag */
+#define CAN_FLAG_FFULL0 ((uint32_t)0x32000008U) /* DATFIFO 0 Full Flag            */
+#define CAN_FLAG_FFOVR0 ((uint32_t)0x32000010U) /* DATFIFO 0 Overrun Flag         */
+#define CAN_FLAG_FFMP1  ((uint32_t)0x14000003U) /* DATFIFO 1 Message Pending Flag */
+#define CAN_FLAG_FFULL1 ((uint32_t)0x34000008U) /* DATFIFO 1 Full Flag            */
+#define CAN_FLAG_FFOVR1 ((uint32_t)0x34000010U) /* DATFIFO 1 Overrun Flag         */
+
+/** Operating Mode Flags **/
+#define CAN_FLAG_WKU  ((uint32_t)0x31000008U) /* Wake up Flag */
+#define CAN_FLAG_SLAK ((uint32_t)0x31000012U) /* Sleep acknowledge Flag */
+/** Note: When SLAK intterupt is disabled (SLKIE=0), no polling on SLAKI is possible.
+         In this case the SLAK bit can be polled. **/
+
+/** Error Flags **/
+#define CAN_FLAG_EWGFL ((uint32_t)0x10F00001U) /* Error Warning Flag   */
+#define CAN_FLAG_EPVFL ((uint32_t)0x10F00002U) /* Error Passive Flag   */
+#define CAN_FLAG_BOFFL ((uint32_t)0x10F00004U) /* Bus-Off Flag         */
+#define CAN_FLAG_LEC   ((uint32_t)0x30F00070U) /* Last error code Flag */
+
+/** Flags in TSTS register */
+#define CAN_FLAGS_TSTS ((uint32_t)0x08000000U)
+/** Flags in RFF1 register */
+#define CAN_FLAGS_RFF1 ((uint32_t)0x04000000U)
+/** Flags in RFF0 register */
+#define CAN_FLAGS_RFF0 ((uint32_t)0x02000000U)
+/** Flags in MSTS register */
+#define CAN_FLAGS_MSTS ((uint32_t)0x01000000U)
+/** Flags in ESTS register */
+#define CAN_FLAGS_ESTS ((uint32_t)0x00F00000U)
+
+/** CAN_interrupts **/
+#define CAN_INT_TME    (CAN_INTE_TMEITE) /* Transmit mailbox empty Interrupt*/
+
+/** Flags named as Interrupts : kept only for FW compatibility **/
+#define CAN_INT_RQCPM0 (CAN_INT_TME)
+#define CAN_INT_RQCPM1 (CAN_INT_TME)
+#define CAN_INT_RQCPM2 (CAN_INT_TME)
+
+/** Receive Interrupts **/
+#define CAN_INT_FMP0 (CAN_INTE_FMPITE0) /* DATFIFO 0 message pending Interrupt*/
+#define CAN_INT_FF0  (CAN_INTE_FFITE0) /* DATFIFO 0 full Interrupt*/
+#define CAN_INT_FOV0 (CAN_INTE_FOVITE0) /* DATFIFO 0 overrun Interrupt*/
+#define CAN_INT_FMP1 (CAN_INTE_FMPITE1) /* DATFIFO 1 message pending Interrupt*/
+#define CAN_INT_FF1  (CAN_INTE_FFITE1) /* DATFIFO 1 full Interrupt*/
+#define CAN_INT_FOV1 (CAN_INTE_FOVITE1) /* DATFIFO 1 overrun Interrupt*/
+
+/** Operating Mode Interrupts **/
+#define CAN_INT_WKU (CAN_INTE_WKUITE) /* Wake-up Interrupt*/
+#define CAN_INT_SLK (CAN_INTE_SLKITE) /* Sleep acknowledge Interrupt*/
+
+/** Error Interrupts **/
+#define CAN_INT_EWG (CAN_INTE_EWGITE) /* Error warning Interrupt*/
+#define CAN_INT_EPV (CAN_INTE_EPVITE) /* Error passive Interrupt*/
+#define CAN_INT_BOF (CAN_INTE_BOFITE) /* Bus-off Interrupt*/
+#define CAN_INT_LEC (CAN_INTE_LECITE) /* Last error code Interrupt*/
+#define CAN_INT_ERR (CAN_INTE_ERRITE) /* Error Interrupt*/
+
+/** Bit definition for CAN_RFFx register **/
+#define CAN_FIFO0_PENDING           (CAN_RFF0_FFMP0) /* DATFIFO 0 Message Pending */
+#define CAN_FIFO1_PENDING           (CAN_RFF1_FFMP1) /* DATFIFO 0 Message Pending */
+#define CAN_FIFOX_PENDING_0         ((uint8_t)0x00U)
+#define CAN_FIFOX_PENDING_1         (CAN_RFF0_FFMP0_0)
+#define CAN_FIFOX_PENDING_2         (CAN_RFF0_FFMP0_1)
+#define CAN_FIFOX_PENDING_3         (CAN_RFF0_FFMP0)
+
+/** Bit definition for CAN_TMDTx register **/
+#define CAN_TMDTx_DLC       (CAN_TMDT0_DLC | CAN_TMDT1_DLC) /* Data Length Code */
+#define CAN_TMDTx_DLC_MASK  (~CAN_TMDTx_DLC)
+
+/** Bit definition for CAN_RMIx register **/
+#define CAN_RMIx_RTRQ  (CAN_RMI0_RTRQ | CAN_RMI1_RTRQ) /* Remote Transmission Request */
+#define CAN_RMIx_IDE   (CAN_RMI0_IDE | CAN_RMI1_IDE) /* Identifier Extension */
+#define CAN_RMIx_EXTID (CAN_RMI0_EXTID | CAN_RMI1_EXTID) /* Extended Identifier */
+#define CAN_RMIx_STDID (CAN_RMI0_STDID | CAN_RMI1_STDID) /* Standard Identifier or Extended Identifier */
+#define CAN_EXTID_MASK (CAN_RMIx_EXTID | CAN_RMIx_STDID)
+
+/** CAN receive FIFO mailbox data register **/
+#define CAN_RMDT_OFFSET             REG_BIT8_OFFSET
+#define CAN_DATA_FIFO_MASK          ((CAN_RMDT0_FMI | CAN_RMDT1_FMI) >> CAN_RMDT_OFFSET)
+
+/** CAN Driving Functions Declaration **/
+
+/** Reset and initialization **/
+void CAN_DeInit(const CAN_Module* CANx);
+uint8_t CAN_Init(CAN_Module* CANx, const CAN_InitType* CAN_InitParam);
+void CAN_InitStruct(CAN_InitType* CAN_InitParam);
+void CAN_InitFilter(const CAN_FilterInitType* CAN_FilterInitParam);
+void CAN_SoftwareReset(CAN_Module* CANx);
+
+/** Configuration **/
+void CAN_DebugFreeze(CAN_Module* CANx, FunctionalState Cmd);
+void CAN_EnTTComMode(CAN_Module* CANx, FunctionalState Cmd);
+
+/** Operating mode control **/
+uint8_t CAN_OperatingModeReq(CAN_Module* CANx, uint8_t CAN_OperatingMode);
+uint8_t CAN_EnterSleep(CAN_Module* CANx);
+uint8_t CAN_WakeUp(CAN_Module* CANx);
+
+/** Transmit **/
+uint8_t CAN_TransmitMessage(CAN_Module* CANx, CanTxMessage* TxMessage);
+uint8_t CAN_TransmitSTS(const CAN_Module* CANx, uint8_t TransmitMailbox);
+void CAN_CancelTransmitMessage(CAN_Module* CANx, uint8_t Mailbox);
+
+/** Receive **/
+void CAN_ReceiveMessage(CAN_Module* CANx, uint8_t FIFONum, CanRxMessage* RxMessage);
+void CAN_ReleaseFIFO(CAN_Module* CANx, uint8_t FIFONum);
+uint8_t CAN_PendingMessage(const CAN_Module* CANx, uint8_t FIFONum);
+
+/** Error management **/
+uint8_t CAN_GetLastErrCode(const CAN_Module* CANx);
+uint8_t CAN_GetReceiveErrCounter(const CAN_Module* CANx);
+uint8_t CAN_GetLSBTransmitErrCounter(const CAN_Module* CANx);
+
+/** Status query **/
+FlagStatus CAN_GetTransmitFailStatus(const CAN_Module* CANx, uint8_t mailbox_queue);
+FlagStatus CAN_GetArbitrationLostStatus(const CAN_Module* CANx, uint8_t mailbox_queue);
+FlagStatus CAN_GetFlagLowestPriority(const CAN_Module* CANx, uint8_t mailbox_queue);
+FlagStatus CAN_GetTransmitMailboxEmptyFlag(const CAN_Module* CANx, uint8_t mailbox_queue);
+FlagStatus CAN_GetReceiveSignal(const CAN_Module* CANx);
+FlagStatus CAN_GetLastSamplePoint(const CAN_Module* CANx);
+FlagStatus CAN_GetReceiveMode(const CAN_Module* CANx);
+FlagStatus CAN_GetTransmitMode(const CAN_Module* CANx);
+uint8_t CAN_GetMailboxCode(const CAN_Module* CANx);
+
+/** Interrupt and flag management **/
+void CAN_INTConfig(CAN_Module* CANx, uint32_t CAN_INT, FunctionalState Cmd);
+FlagStatus CAN_GetFlagSTS(const CAN_Module* CANx, uint32_t CAN_FLAG);
+void CAN_ClearFlag(CAN_Module* CANx, uint32_t CAN_FLAG);
+INTStatus CAN_GetIntStatus(const CAN_Module* CANx, uint32_t CAN_INT);
+void CAN_ClearINTPendingBit(CAN_Module* CANx, uint32_t CAN_INT);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __N32WB033_CAN_H__ */
+

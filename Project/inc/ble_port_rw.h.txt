@@ -1,0 +1,24 @@
+#ifndef BLE_PORT_RW_H
+#define BLE_PORT_RW_H
+
+#include "ble_port.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define BLE_PORT_CONN_INDEX_UNKNOWN 0xFFu
+#define BLE_PORT_TX_TOKEN_UNKNOWN 0u
+
+uint8_t ble_port_conn_index_of(ble_endpoint_id_t endpoint);
+void ble_port_data_rx(uint8_t sdk_conidx, const uint8_t *data, uint16_t len);
+int ble_port_phone_cccd_set(uint8_t sdk_conidx, uint8_t enabled);
+void ble_port_on_tx_cfm(ble_endpoint_id_t endpoint, uint8_t conn_index,
+                        uint16_t tx_token);
+void ble_port_control_rx(const uint8_t *data, uint16_t len);
+void ble_port_bms_ready(uint8_t conn_index, uint8_t status);
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* BLE_PORT_RW_H */

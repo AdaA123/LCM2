@@ -1,0 +1,49 @@
+#ifndef CHAR_STREAM_H
+#define CHAR_STREAM_H
+
+#include <stdint.h>
+#include "core.h"
+#include "ringbuffer.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef int (*stream_submit_t)(void *context, const uint8_t *data, uint16_t length);
+
+typedef struct 
+{
+    sys_ringbuf_t       rx_fifo;
+    sys_ringbuf_t       tx_fifo;
+    uint8_t            *tx_stage;
+    uint16_t            tx_stage_capacity;
+    uint16_t            tx_submit_limit;
+    uint8_t             tx_state;
+    uint8_t             tx_done_pending;
+    uint32_t            rx_drop;
+    uint32_t            tx_drop;
+    stream_submit_t submit;
+    void                *submit_context;
+} stream_t;
+
+int Stream_Init(stream_t *stream, uint8_t *rx_buffer, uint16_t rx_capacity, uint8_t *tx_buffer, uint16_t tx_capacity, uint8_t *tx_stage, uint16_t tx_stage_capacity, stream_submit_t submit, void *submit_context);
+void Stream_Reset(stream_t *stream);
+void Stream_TxReset(stream_t *stream);
+
+uint16_t Stream_Read(stream_t *stream, uint8_t *buffer, uint16_t size);
+uint16_t Stream_RxPeek(const stream_t *stream, uint8_t *buffer, uint16_t size);
+uint16_t Stream_Write(stream_t *stream, const uint8_t *buffer, uint16_t size);
+uint16_t Stream_RxWrite(stream_t *stream, const uint8_t *buffer, uint16_t size);
+uint16_t Stream_RxCount(const stream_t *stream);
+uint16_t Stream_RxSpace(const stream_t *stream);
+uint16_t Stream_TxSpace(const stream_t *stream);
+
+int Stream_TxSubmitLimitSet(stream_t *stream, uint16_t limit);
+void Stream_TxPump(stream_t *stream);
+int Stream_TxComplete(stream_t *stream);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* CHAR_STREAM_H */

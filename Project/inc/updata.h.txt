@@ -1,0 +1,7 @@
+#ifndef UPDATA_COMPAT_H
+#define UPDATA_COMPAT_H
+
+/* Deprecated compatibility include. Use firmware_update.h. */
+#include "firmware_update.h"
+
+#endif

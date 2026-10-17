@@ -1,0 +1,2255 @@
+/**
+*     Copyright (c) 2025, NSING Technologies Inc.
+*
+*     All rights reserved.
+*
+*     This software is the exclusive property of NSING Technologies Inc. (Hereinafter
+* referred to as NSING). This software, and the product of NSING described herein
+* (Hereinafter referred to as the Product) are owned by NSING under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     NSING does not grant any license under its patents, copyrights, trademarks, or other
+* intellectual property rights. Names and brands of third party may be mentioned or referred
+* thereto (if any) for identification purposes only.
+*
+*     NSING reserves the right to make changes, corrections, enhancements, modifications, and
+* improvements to this software at any time without notice. Please contact NSING and obtain
+* the latest version of this software before placing orders.
+
+*     Although NSING has attempted to provide accurate and reliable information, NSING assumes
+* no responsibility for the accuracy and reliability of this software.
+*
+*     It is the responsibility of the user of this software to properly design, program, and test
+* the functionality and safety of any application made of this information and any resulting product.
+* In no event shall NSING be liable for any direct, indirect, incidental, special,exemplary, or
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     NSING Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify NSING and hold NSING
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by NSING, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     NSING products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations.
+* User shall comply with any applicable export control laws and regulations promulgated and administered by
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+/**
+ * @file ns_ble.c
+ * @author NSING Firmware Team
+ * @version v1.0.0
+ *
+ * @copyright Copyright (c) 2025, NSING Technologies Inc. All rights reserved.
+ */
+
+/**
+ * @addtogroup APP
+ * @{
+ */
+
+/* Includes ------------------------------------------------------------------*/
+#include "rwip_config.h"             // SW configuration
+
+#if (BLE_APP_PRESENT)
+#include "n32wb033_rcc.h"
+#include "n32wb033_exti.h"
+#include "ns_sleep.h"
+#include "ns_ble.h"
+#include "ns_ble_task.h"
+#if (BLE_APP_SEC)
+#include "ns_sec.h"                 // Application security Definition
+#endif // (BLE_APP_SEC)
+#if (NS_TIMER_ENABLE)
+#include "ns_timer.h"
+#endif //NS_TIMER_ENABLE
+
+/* Private define ------------------------------------------------------------*/
+/* Private constants ---------------------------------------------------------*/
+/* Private typedef -----------------------------------------------------------*/
+
+/* Private variables ---------------------------------------------------------*/
+
+/// List of functions used to create the database
+struct ns_ble_add_prf_evn_t  add_prf_evn;
+struct ns_ble_prf_evn_t      ble_prf_evn;
+
+/// Application Environment Structure
+struct app_env_tag      app_env;
+struct ns_gap_params_t  gap_env;
+struct ns_adv_params_t  adv_env;
+struct ns_scan_params_t scan_env;
+
+/* Opt-in lifecycle for connected monitoring. Legacy callers keep their path. */
+enum strict_scan_phase
+{
+    STRICT_SCAN_IDLE, STRICT_SCAN_CREATING, STRICT_SCAN_CREATED,
+    STRICT_SCAN_STARTING, STRICT_SCAN_ACTIVE, STRICT_SCAN_STOPPING,
+    STRICT_SCAN_STOPPED, STRICT_SCAN_DELETING, STRICT_SCAN_FAILED
+};
+static struct
+{
+    uint8_t enabled, phase, stop_requested, stopped_seen, stop_completed;
+    uint8_t stop_retries, delete_retries, failed_operation;
+    uint8_t adv_stopped_pending, adv_intent;
+} strict_scan;
+static uint8_t adv_pending_operation = 0xFFu;
+#define STRICT_SCAN_RETRY_LIMIT 2u
+
+/* Private function prototypes -----------------------------------------------*/
+/// Application Task Descriptor
+extern const struct ke_task_desc TASK_DESC_APP_M;
+//static rwip_time_t reload_time = {0};
+/* Private functions ---------------------------------------------------------*/
+
+void ns_HardFault_Handler(void)
+{
+    /* Logging is intentionally forbidden in exception context: printf may
+     * re-enter the character-device TX path while its state is inconsistent. */
+    NVIC_SystemReset();
+
+    while(1)
+    {}
+}
+
+void ns_NMI_Handler(void)
+{
+    NVIC_SystemReset();
+
+    while(1)
+    {}
+}
+
+static __inline void NS_BLE_STACK_INIT()
+{
+    SCB->VTOR = 0;
+    g_branch.enable_prerx_in_slp = 0;
+    g_branch.default_pin_timer = true;
+    g_system_clk            = HSI_VALUE;
+    llm_local_le_feats.feats[0] = 0xff;
+    llm_local_le_feats.feats[1] = 0xf7;
+    llm_local_le_feats.feats[2] = 0x01;
+    llm_local_le_feats.feats[3] = 0x07;
+    llm_local_le_feats.feats[4] = 0x00;
+    llm_local_le_feats.feats[5] = 0x00;
+    llm_local_le_feats.feats[6] = 0x00;
+    llm_local_le_feats.feats[7] = 0x00;
+    prf_func.init               = prf_init;
+    prf_func.create             = prf_create;
+    prf_func.cleanup            = prf_cleanup;
+    prf_func.add_profile        = (uint8_t (*)(void *, uint16_t *))prf_add_profile;
+    prf_func.get_task_from_id   = prf_get_task_from_id;
+    prf_func.get_id_from_task   = prf_get_id_from_task;
+    llhwc_phy_initialization_ptr = llhwc_phy_init;
+    llhwc_phy_prerx_ptr = pretxrx;
+    chn_table_init_ptr = chn_table_init;
+    rwip_init(RESET_NO_ERROR);
+}
+
+/**
+ *****************************************************************************************
+ * @brief create advertising activity
+ *
+ *****************************************************************************************
+ */
+static void app_create_advertising(void)
+{
+    NS_LOG_DEBUG("%s\r\n", __func__);
+
+    if(app_env.adv_state == APP_ADV_STATE_IDLE)
+    {
+        // Prepare the GAPM_ACTIVITY_CREATE_CMD message
+        struct gapm_activity_create_adv_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_CREATE_CMD,
+            TASK_GAPM, TASK_APP,
+            gapm_activity_create_adv_cmd);
+        // Set operation code
+        p_cmd->operation = GAPM_CREATE_ADV_ACTIVITY;
+        // Fill the allocated kernel message
+        p_cmd->own_addr_type                = gap_env.mac_addr_type;
+        p_cmd->adv_param.type               = GAPM_ADV_TYPE_LEGACY;
+        p_cmd->adv_param.prop               = GAPM_ADV_PROP_UNDIR_CONN_MASK;
+        p_cmd->adv_param.filter_pol         = ADV_ALLOW_SCAN_ANY_CON_ANY;
+        p_cmd->adv_param.disc_mode          = GAPM_ADV_MODE_GEN_DISC;
+        p_cmd->adv_param.prim_cfg.chnl_map  = ADV_ALL_CHNLS_EN;
+        p_cmd->adv_param.prim_cfg.phy       = adv_env.adv_phy;
+
+        if(adv_env.beacon_enable)
+        {
+            p_cmd->adv_param.prop           = GAPM_ADV_PROP_NON_CONN_NON_SCAN_MASK;
+            p_cmd->adv_param.disc_mode      = GAPM_ADV_MODE_BEACON;
+        }
+        else if(adv_env.ex_adv_enable)
+        {
+            if(adv_env.adv_phy == PHY_2MBPS_VALUE)
+                p_cmd->adv_param.prim_cfg.phy   = PHY_1MBPS_VALUE;
+
+            p_cmd->adv_param.type               = GAPM_ADV_TYPE_EXTENDED;
+            p_cmd->adv_param.prop               = GAPM_EXT_ADV_PROP_UNDIR_CONN_MASK;
+            p_cmd->adv_param.second_cfg.phy     = adv_env.adv_phy;
+            p_cmd->adv_param.second_cfg.adv_sid = 1;
+            p_cmd->adv_param.second_cfg.max_skip = 0;
+        }
+
+        switch(app_env.adv_mode)
+        {
+            case APP_ADV_MODE_DIRECTED:
+                /*
+                 * If the peripheral is already bonded with a central device, use the direct advertising
+                 * procedure (BD Address of the peer device is stored in NVDS.
+                 */
+#if(BLE_APP_SEC)
+                if(ns_sec_get_bond_status())
+                {
+                    p_cmd->adv_param.prop                   = GAPM_ADV_PROP_DIR_CONN_MASK;
+                    p_cmd->adv_param.disc_mode              = GAPM_ADV_MODE_NON_DISC;
+                    p_cmd->adv_param.prim_cfg.adv_intv_min  = adv_env.directed_adv.adv_intv;
+                    p_cmd->adv_param.prim_cfg.adv_intv_max  = adv_env.directed_adv.adv_intv;
+                    //set addr for dir
+                    ns_bond_last_bonded_peer_id(&p_cmd->adv_param.peer_addr);
+                }
+                else
+#endif
+                {
+                    app_env.adv_mode = APP_ADV_MODE_FAST;
+                    p_cmd->adv_param.prim_cfg.adv_intv_min = adv_env.fast_adv.adv_intv;
+                    p_cmd->adv_param.prim_cfg.adv_intv_max = adv_env.fast_adv.adv_intv;
+                }
+
+                break;
+
+            case APP_ADV_MODE_FAST:
+                p_cmd->adv_param.prim_cfg.adv_intv_min = adv_env.fast_adv.adv_intv;
+                p_cmd->adv_param.prim_cfg.adv_intv_max = adv_env.fast_adv.adv_intv;
+                break;
+
+            case APP_ADV_MODE_SLOW:
+                p_cmd->adv_param.prim_cfg.adv_intv_min = adv_env.slow_adv.adv_intv;
+                p_cmd->adv_param.prim_cfg.adv_intv_max = adv_env.slow_adv.adv_intv;
+                break;
+
+            default:
+                break;
+        }
+
+        // Keep the current operation
+        app_env.adv_state = APP_ADV_STATE_CREATING;
+        // And the next expected operation code for the command completed event
+        app_env.current_op = CURRENT_OP_CREATE_ADV;
+        adv_pending_operation = GAPM_CREATE_ADV_ACTIVITY;
+        // Send the message
+        ke_msg_send(p_cmd);
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief delete advertising activity
+ *
+ *****************************************************************************************
+ */
+static void app_delete_activity(void)
+{
+    // Prepare the GAPM_ACTIVITY_CREATE_CMD message
+    struct gapm_activity_delete_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_DELETE_CMD,
+        TASK_GAPM, TASK_APP,
+        gapm_activity_delete_cmd);
+    NS_LOG_DEBUG("%s\r\n", __func__);
+    // Set operation code
+    p_cmd->operation = GAPM_DELETE_ACTIVITY;
+    p_cmd->actv_idx  = app_env.adv_actv_idx;
+    // Keep the current operation
+    // And the next expected operation code for the command completed event
+    app_env.current_op   = CURRENT_OP_DELETE_ADV;
+    adv_pending_operation = GAPM_DELETE_ACTIVITY;
+    app_env.adv_state = APP_ADV_STATE_IDLE; //reset state
+
+    //set next adv mode
+    if(ke_state_get(TASK_APP) == APP_CONNECTED)
+    {
+        //connected, stop adv
+        app_env.adv_mode = APP_ADV_MODE_STOP;
+    }
+    else
+    {
+        //not connect yet, start next adv
+        switch(app_env.adv_mode)
+        {
+            case APP_ADV_MODE_ENABLE:
+
+            //restart adv
+            case APP_ADV_MODE_DIRECTED:
+                if(adv_env.fast_adv.enable)
+                {
+                    app_env.adv_mode = APP_ADV_MODE_FAST;
+                    break;
+                }
+
+            case APP_ADV_MODE_FAST:
+                if(adv_env.slow_adv.enable)
+                {
+                    app_env.adv_mode = APP_ADV_MODE_SLOW;
+                    break;
+                }
+
+            case APP_ADV_MODE_SLOW:
+                app_env.adv_mode = APP_ADV_MODE_STOP;
+                break;
+
+            default:
+                app_env.adv_mode = APP_ADV_MODE_STOP;
+                break;
+        }
+    }
+
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief start advertising activity
+ *
+ *****************************************************************************************
+ */
+static void app_start_advertising(void)
+{
+    NS_LOG_DEBUG("%s\r\n", __func__);
+    // Prepare the GAPM_ACTIVITY_START_CMD message
+    struct gapm_activity_start_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_START_CMD,
+                                            TASK_GAPM, TASK_APP,
+                                            gapm_activity_start_cmd);
+    p_cmd->operation = GAPM_START_ACTIVITY;
+    p_cmd->actv_idx = app_env.adv_actv_idx;
+
+    switch(app_env.adv_mode)
+    {
+        case APP_ADV_MODE_DIRECTED:
+            NS_LOG_DEBUG("APP_ADV_MODE_DIRECTED ");
+            p_cmd->u_param.adv_add_param.duration = SECS_TO_UNIT(adv_env.directed_adv.duration, SECS_UNIT_10MS);
+            break;
+
+        case APP_ADV_MODE_FAST:
+            NS_LOG_DEBUG("APP_ADV_MODE_FAST ");
+            p_cmd->u_param.adv_add_param.duration = SECS_TO_UNIT(adv_env.fast_adv.duration, SECS_UNIT_10MS);
+            break;
+
+        case APP_ADV_MODE_SLOW:
+            NS_LOG_DEBUG("APP_ADV_MODE_SLOW ");
+            p_cmd->u_param.adv_add_param.duration = SECS_TO_UNIT(adv_env.slow_adv.duration, SECS_UNIT_10MS);
+            break;
+
+        default:
+            p_cmd->u_param.adv_add_param.duration = 0;
+            break;
+    }
+
+    NS_LOG_DEBUG(", duration: %d x10 ms\r\n", p_cmd->u_param.adv_add_param.duration);
+    p_cmd->u_param.adv_add_param.max_adv_evt = 0;
+    llhwc_modem_setmode(adv_env.adv_phy);
+    // Keep the current operation
+    app_env.adv_state = APP_ADV_STATE_STARTING;
+    // And the next expected operation code for the command completed event
+    app_env.current_op = CURRENT_OP_START_ADV;
+    adv_pending_operation = GAPM_START_ACTIVITY;
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief stop advertising activity
+ *
+ *****************************************************************************************
+ */
+static void app_stop_advertising(void)
+{
+    // Prepare the GAPM_ACTIVITY_STOP_CMD message
+    struct gapm_activity_stop_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_STOP_CMD,
+                                           TASK_GAPM, TASK_APP,
+                                           gapm_activity_stop_cmd);
+    NS_LOG_DEBUG("%s\r\n", __func__);
+    // Fill the allocated kernel message
+    p_cmd->operation = GAPM_STOP_ACTIVITY;
+    p_cmd->actv_idx = app_env.adv_actv_idx;
+    // Update advertising state
+    app_env.adv_state = APP_ADV_STATE_STOPPING;
+    // And the next expected operation code for the command completed event
+    app_env.current_op   = CURRENT_OP_STOP_ADV;
+    adv_pending_operation = GAPM_STOP_ACTIVITY;
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief set advertising data
+ *
+ *****************************************************************************************
+ */
+static void app_set_adv_data(void)
+{
+    uint8_t data_len;
+
+    if(adv_env.ex_adv_enable)
+        data_len = adv_env.ex_adv_data_len;
+    else
+        data_len = adv_env.adv_data_len;
+
+    // Prepare the GAPM_SET_ADV_DATA_CMD message
+    struct gapm_set_adv_data_cmd *p_cmd = KE_MSG_ALLOC_DYN(GAPM_SET_ADV_DATA_CMD,
+                                          TASK_GAPM, TASK_APP,
+                                          gapm_set_adv_data_cmd,
+                                          data_len);
+    NS_LOG_DEBUG("%s\r\n", __func__);
+    // Fill the allocated kernel message
+    p_cmd->operation = GAPM_SET_ADV_DATA;
+    p_cmd->actv_idx = app_env.adv_actv_idx;
+    p_cmd->length = 0;
+
+    // GAP will use 3 bytes for the AD Type
+    if(adv_env.ex_adv_enable)
+        memcpy(&p_cmd->data[0], adv_env.ex_adv_p_data, adv_env.ex_adv_data_len);
+    else
+        memcpy(&p_cmd->data[0], adv_env.adv_data, adv_env.adv_data_len);
+
+    p_cmd->length += data_len;
+
+    // Update advertising state
+    if(app_env.adv_state != APP_ADV_STATE_STARTED)  //update adv data when adv started
+        app_env.adv_state = APP_ADV_STATE_SETTING_ADV_DATA;
+
+    // And the next expected operation code for the command completed event
+    app_env.current_op   = CURRENT_OP_SET_ADV_DATA;
+    adv_pending_operation = GAPM_SET_ADV_DATA;
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief set advertising scan response data
+ *
+ *****************************************************************************************
+ */
+static void app_set_scan_rsp_data(void)
+{
+    uint8_t rem_len = ADV_DATA_LEN;
+    // Prepare the GAPM_SET_ADV_DATA_CMD message
+    struct gapm_set_adv_data_cmd *p_cmd = KE_MSG_ALLOC_DYN(GAPM_SET_ADV_DATA_CMD,
+                                          TASK_GAPM, TASK_APP,
+                                          gapm_set_adv_data_cmd,
+                                          ADV_DATA_LEN);
+    NS_LOG_DEBUG("%s\r\n", __func__);
+    // Fill the allocated kernel message
+    p_cmd->operation = GAPM_SET_SCAN_RSP_DATA;
+    p_cmd->actv_idx = app_env.adv_actv_idx;
+    p_cmd->length = adv_env.scan_rsp_data_len;
+    memcpy(&p_cmd->data[0], adv_env.scan_rsp_data, adv_env.scan_rsp_data_len);
+    // Get remaining space in the Advertising Data - 2 bytes are used for name length/flag
+    rem_len -= p_cmd->length;
+    uint8_t *p_buf = &p_cmd->data[p_cmd->length];
+
+    // Check if additional data can be added to the Advertising data - 2 bytes needed for type and length
+    if(rem_len > 3 && adv_env.attach_appearance)
+    {
+        // appearance length
+        *p_buf = 3 ;
+        // appearance flag
+        *(p_buf + 1) = 0x19;//ADV_TYPE_APPEARANCE
+        // Copy device name
+        *(p_buf + 3) = (gap_env.appearance >> 8) & 0xff; //hight 8bit
+        *(p_buf + 2) = gap_env.appearance & 0xff;    //low 8bit
+        // Update advertising data length
+        p_cmd->length += 4;
+        p_buf += 4;
+        //Update Remaining Length
+        rem_len -= 4;
+    }
+
+    // Check if additional data can be added to the Advertising data - 2 bytes needed for type and length
+    if(rem_len > 2 && adv_env.attach_name)
+    {
+        uint8_t dev_name_length = co_min(gap_env.dev_name_len, (rem_len - 2));
+        // Device name length
+        *p_buf = dev_name_length + 1;
+        // Device name flag (check if device name is complete or not)
+        *(p_buf + 1) = (dev_name_length == gap_env.dev_name_len) ? '\x09' : '\x08';
+        // Copy device name
+        memcpy(p_buf + 2, gap_env.dev_name, dev_name_length);
+        // Update advertising data length
+        p_cmd->length += (dev_name_length + 2);
+    }
+
+    // Update advertising state
+    if(app_env.adv_state != APP_ADV_STATE_STARTED)  //update rsp data when adv started
+        app_env.adv_state = APP_ADV_STATE_SETTING_SCAN_RSP_DATA;
+
+    // And the next expected operation code for the command completed event
+    app_env.current_op   = CURRENT_OP_SET_RSP_DATA;
+    adv_pending_operation = GAPM_SET_SCAN_RSP_DATA;
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief BLE stack reset command
+ *
+ *****************************************************************************************
+ */
+static void app_send_gapm_reset_cmd(void)
+{
+    // Reset the stack
+    struct gapm_reset_cmd *p_cmd = KE_MSG_ALLOC(GAPM_RESET_CMD,
+                                   TASK_GAPM, TASK_APP,
+                                   gapm_reset_cmd);
+    p_cmd->operation = GAPM_RESET;
+    ke_msg_send(p_cmd);
+}
+
+/**
+ * @brief Initialize the BLE application environment.
+ **/
+static void ns_ble_evn_init(void)
+{
+    memset(&strict_scan, 0, sizeof(strict_scan));
+    adv_pending_operation = 0xFFu;
+    NS_LOG_DEBUG("%s\r\n", __func__);
+    // Reset the application manager environment
+    memset(&app_env, 0, sizeof(app_env));
+    memset(&gap_env, 0, sizeof(gap_env));
+    memset(&adv_env, 0, sizeof(adv_env));
+    memset(&scan_env, 0, sizeof(scan_env));
+    app_env.adv_actv_idx = 0xFF;
+    app_env.scan_actv_idx = 0xFF;
+    app_env.init_actv_idx = 0xFF;
+
+    for(uint8_t i = 0; i < APP_CON_IDX_MAX; i++)
+        app_env.conn_env[i].conidx = GAP_INVALID_CONIDX;
+}
+
+/**
+ * @brief Initialize the BLE application task.
+ **/
+static void ns_ble_task_init(void)
+{
+    NS_LOG_DEBUG("%s\r\n", __func__);
+    // Create APP task
+    ke_task_create(TASK_APP, &TASK_DESC_APP_M);
+    // Initialize Task state
+    ke_state_set(TASK_APP, APP_INIT);
+}
+
+/**
+ * @brief Add a required service in the database
+ **/
+bool ns_ble_add_svc(void)
+{
+    // Indicate if more services need to be added in the database
+    bool more_svc = false;
+
+    // Check if another should be added in the database
+    if(app_env.next_svc < add_prf_evn.prf_num)
+    {
+        ASSERT_INFO(app_add_svc_func_list[app_env.next_svc] != NULL, app_env.next_svc, 1);
+        // Call the function used to add the required service
+        NS_LOG_DEBUG("%s\r\n", __func__);
+        add_prf_evn.add_prf_func_list[app_env.next_svc]();
+        // Select following service to add
+        app_env.next_svc++;
+        more_svc = true;
+    }
+
+    return more_svc;
+}
+
+/**
+ *****************************************************************************************
+ * @brief create advertising activity
+ *
+ *****************************************************************************************
+ */
+bool ns_ble_add_prf_func_register(ns_ble_add_prf_func_t func)
+{
+    if(add_prf_evn.prf_num < BLE_NB_PROFILES)
+    {
+        //add profile to list
+        add_prf_evn.add_prf_func_list[add_prf_evn.prf_num] = func;
+        add_prf_evn.prf_num++;
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ *****************************************************************************************
+ * @brief add the profile handler in the list
+ *
+ *****************************************************************************************
+ */
+bool ns_ble_prf_task_register(struct prf_task_t *prf)
+{
+    if(ble_prf_evn.prf_num < BLE_NB_PROFILES)
+    {
+        //add profile to list
+        memcpy(&ble_prf_evn.prf_task_list[ble_prf_evn.prf_num],
+               prf, sizeof(struct prf_task_t));
+        ble_prf_evn.prf_num++;
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * @brief Set slave latency without connection parameters update
+ **/
+void ns_ble_set_slave_latency(uint16_t latency_cfg)
+{
+    // Prepare the GAPC_SET_PREF_SLAVE_LATENCY message
+    struct gapc_set_pref_slave_latency_cmd *p_cmd = KE_MSG_ALLOC(GAPC_SET_PREF_SLAVE_LATENCY_CMD,
+        KE_BUILD_ID(TASK_GAPC, app_env.conidx), TASK_APP,
+        gapc_set_pref_slave_latency_cmd);
+    p_cmd->operation  = GAPC_SET_PREF_SLAVE_LATENCY;
+    p_cmd->latency    = latency_cfg;
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+/**
+ * @brief Send to request to update the connection parameters
+ **/
+bool ns_ble_update_param(struct gapc_conn_param *p_conn_param)
+{
+    /********** connection parameters requirement *************
+    Interval Max * (Slave Latency + 1) <= 4 s
+    Interval Max >= 7.5 ms
+    Interval Min <= Interval Max
+    ConnSupervisionTimeout <= 10 s
+    Interval Max * ( Slave Latency + 1) * 3 < ConnSupervisionTimeout
+    ****************************************************************/
+    NS_LOG_DEBUG("%s\r\n", __func__);
+
+    if((p_conn_param->intv_max * (p_conn_param->latency + 1) > 3200/* 4s */)  ||
+       (p_conn_param->intv_max < 6 /* 7.5ms */) ||
+       (p_conn_param->intv_max < p_conn_param->intv_min) ||
+       (p_conn_param->time_out > 1000 /* 10s */) ||
+       (p_conn_param->intv_max * (p_conn_param->latency + 1) * 3) > (p_conn_param->time_out * 8 /* 10/1.25 */))
+    {
+        NS_LOG_WARNING("request parameters error\r\n");
+        return false;
+    }
+
+    // Prepare the GAPC_PARAM_UPDATE_CMD message
+    struct gapc_param_update_cmd *p_cmd = KE_MSG_ALLOC(GAPC_PARAM_UPDATE_CMD,
+                                          KE_BUILD_ID(TASK_GAPC, app_env.conidx), TASK_APP,
+                                          gapc_param_update_cmd);
+    p_cmd->operation  = GAPC_UPDATE_PARAMS;
+    p_cmd->intv_min   = p_conn_param->intv_min;
+    p_cmd->intv_max   = p_conn_param->intv_max;
+    p_cmd->latency    = p_conn_param->latency;
+    p_cmd->time_out   = p_conn_param->time_out;
+    // not used by a slave device
+    p_cmd->ce_len_min = 0x0;
+    p_cmd->ce_len_max = 0xFFFF;
+    // Send the message
+    ke_msg_send(p_cmd);
+    return true;
+}
+
+/**
+ * @brief master device get peer info
+ *  op:  GAPC_GET_PEER_FEATURES
+ *       GAPC_GET_PEER_VERSION
+ */
+void ns_ble_get_peer_info(uint8_t op)
+{
+    NS_LOG_DEBUG("%s,app_env.conidx= %d\r\n", __func__, app_env.conidx);
+    struct gapc_get_info_cmd *cmd = KE_MSG_ALLOC(GAPC_GET_INFO_CMD,
+                                    KE_BUILD_ID(TASK_GAPC, app_env.conidx), TASK_APP,
+                                    gapc_get_info_cmd);
+    cmd->operation = op;
+    // Send the message
+    ke_msg_send(cmd);
+}
+
+/**
+ * @brief set ble dle
+ **/
+void ns_ble_dle_set(uint16_t tx_octets, uint16_t tx_time)
+{
+    struct gapc_set_le_pkt_size_cmd *cmd = KE_MSG_ALLOC(GAPC_SET_LE_PKT_SIZE_CMD,
+                                           KE_BUILD_ID(TASK_GAPC, app_env.conidx), TASK_APP,
+                                           gapc_set_le_pkt_size_cmd);
+    cmd->operation = GAPC_SET_LE_PKT_SIZE;
+    cmd->tx_octets = tx_octets;
+    cmd->tx_time   = tx_time;
+    // Send the message
+    ke_msg_send(cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief Set ble mtu .
+ *
+ * @param[in] mtu:  mtu value (23-517).
+ *****************************************************************************************
+ */
+void ns_ble_mtu_set(uint16_t mtu)
+{
+    struct gattc_exc_mtu_cmd *cmd = KE_MSG_ALLOC(GATTC_EXC_MTU_CMD,
+                                    KE_BUILD_ID(TASK_GATTC, app_env.conidx), TASK_APP,
+                                    gattc_exc_mtu_cmd);
+    gapm_env.max_mtu = mtu;
+    cmd->operation = GATTC_MTU_EXCH;
+    cmd->seq_num = 0;
+    ke_msg_send(cmd);
+}
+
+/**
+ * @brief set ble phy
+ **/
+void ns_ble_phy_set(enum ble_phy_val phy)
+{
+    struct gapc_set_phy_cmd *cmd = KE_MSG_ALLOC(GAPC_SET_PHY_CMD,
+                                   KE_BUILD_ID(TASK_GAPC, app_env.conidx), TASK_APP,
+                                   gapc_set_phy_cmd);
+    cmd->operation = GAPC_SET_PHY;
+    cmd->rx_phy  = phy & (GAP_PHY_LE_1MBPS | GAP_PHY_LE_2MBPS | GAP_PHY_LE_CODED);
+    cmd->tx_phy  = phy & (GAP_PHY_LE_1MBPS | GAP_PHY_LE_2MBPS | GAP_PHY_LE_CODED);
+    cmd->phy_opt = (phy >> 4) & (PHY_OPT_S8_LE_CODED_TX_PREF | PHY_OPT_S2_LE_CODED_TX_PREF);
+    ke_msg_send(cmd);
+}
+
+/**
+ * @brief active get ble RSSI with an interval in ms. 0ms mean active one time only
+ **/
+void ns_ble_active_rssi(uint32_t interval)
+{
+    struct gapc_get_info_cmd* info_cmd = KE_MSG_ALLOC(GAPC_GET_INFO_CMD,
+                                         KE_BUILD_ID(TASK_GAPC, app_env.conidx), TASK_APP,
+                                         gapc_get_info_cmd);
+    app_env.rssi_intv = interval;
+    app_env.rssi_conidx = app_env.conidx;
+    // request RSSI
+    info_cmd->operation = GAPC_GET_CON_RSSI;
+    // send command
+    ke_msg_send(info_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief  advertising statemachine
+ *
+ *****************************************************************************************
+ */
+void ns_ble_adv_fsm_next(void)
+{
+    NS_LOG_DEBUG("%s,adv_state:%d \r\n", __func__, app_env.adv_state);
+
+    switch(app_env.adv_state)
+    {
+        case(APP_ADV_STATE_IDLE):
+        {
+            if(app_env.adv_mode != APP_ADV_MODE_STOP)
+            {
+                // Create advertising
+                app_create_advertising();
+            }
+        }
+        break;
+
+        case(APP_ADV_STATE_CREATING):
+        {
+            if(app_env.adv_mode == APP_ADV_MODE_DIRECTED)
+            {
+                // Start advertising activity
+                app_start_advertising();
+            }
+            else
+            {
+                // Set advertising data
+                app_set_adv_data();
+            }
+        }
+        break;
+
+        case(APP_ADV_STATE_SETTING_ADV_DATA):
+        {
+            if(adv_env.beacon_enable || adv_env.ex_adv_enable)
+                app_start_advertising();
+
+            else
+            {
+                // Set scan response data
+                app_set_scan_rsp_data();
+            }
+        }
+        break;
+
+        case(APP_ADV_STATE_CREATED):
+        case(APP_ADV_STATE_SETTING_SCAN_RSP_DATA):
+        {
+            // Start advertising activity
+            app_start_advertising();
+        }
+        break;
+
+        case(APP_ADV_STATE_STARTING):
+        {
+            // Go to started state
+            app_env.adv_state = APP_ADV_STATE_STARTED;
+        }
+        break;
+
+        case(APP_ADV_STATE_STARTED):
+        {
+            // Stop advertising activity
+            app_stop_advertising();
+        }
+        break;
+
+        case(APP_ADV_STATE_STOPPING):
+        {
+            //delete activity when advertising stop
+            app_delete_activity();
+        }
+        break;
+
+        default:
+        {
+            ASSERT_ERR(0);
+        }
+        break;
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief lsc configuration
+ *
+ *****************************************************************************************
+ */
+void ns_ble_lsc_config(ble_lsc_cfg_t lsc_set)
+{
+    //Config the LSC for stack
+    if(lsc_set == BLE_LSC_LSE_32768HZ)
+    {
+        //enable LSE and select LSC as LSE
+        *(uint32_t*)0x40011808U |= 0xF00;
+        RCC->LSCTRL |= RCC_LSCTRL_LSEEN;
+
+        while(!(RCC->LSCTRL & RCC_LSCTRL_LSERD));
+
+        RCC->LSCTRL |= RCC_LSCTRL_LSXSEL;
+        g_lsi_1_syscle_cal_value = 1000;
+        //lse frequency 32768
+        g_lsi_1_syscle_cnt_value = 976;  //32000000/32768 = 976.56 //must fixed
+    }
+    else
+    {
+        //LSC select LSI
+        RCC->LSCTRL |= RCC_LSCTRL_LSIEN;
+
+        while(!(RCC->LSCTRL & RCC_LSCTRL_LSIRD));
+
+        RCC->LSCTRL &= ~RCC_LSCTRL_LSXSEL;
+
+        /* set lsi frequency, (32m/lsc_freq) 32k:1000 , 28.8k 1111.11 , 32.768: 976.56 */
+        /* g_lsi_1_syscle_cal_value = 32000000/lsc_freq; */
+        switch(lsc_set)
+        {
+            case BLE_LSC_LSI_32768HZ:
+                g_lsi_1_syscle_cal_value = 977;
+                break;
+
+            case BLE_LSC_LSI_28800HZ:
+                g_lsi_1_syscle_cal_value = 1111;
+                break;
+
+            case BLE_LSC_LSI_32000HZ:
+            default:
+                g_lsi_1_syscle_cal_value = 1000;
+                break;
+        }
+
+        g_lsi_1_syscle_cnt_value = ns_calib_lsi_clk();//rom_calib_lsi_clk(); //take 7.5ms
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief ble initialization
+ *
+ *****************************************************************************************
+ */
+void ns_ble_stack_init(struct ns_stack_cfg_t const* p_init)
+{
+    ns_ble_evn_init();
+    app_env.ble_msg_handler = p_init->ble_msg_handler;
+    app_env.user_msg_handler = p_init->user_msg_handler;
+
+    if(p_init->lsc_cfg <= BLE_LSC_LSE_32768HZ)
+        app_env.lsc_cfg = p_init->lsc_cfg;
+    else
+    {
+        //set LSI 32000HZ as default
+        app_env.lsc_cfg = BLE_LSC_LSI_32000HZ;
+    }
+
+    NS_BLE_PATCH_INIT();
+    NS_BLE_STACK_INIT();
+    ns_ble_task_init();
+    // Reset the stack
+    app_send_gapm_reset_cmd();
+    RWIP_MINIMUM_SLEEP_TIME  = 32;
+    HardFault_Handler_ptr =  ns_HardFault_Handler;
+    NMI_IRQHandler_ptr = ns_NMI_Handler;
+    rom_ble_wake_exti21_cfg();
+}
+
+void ns_ble_gap_init(struct ns_gap_params_t const* p_init)
+{
+    if(p_init != NULL)
+        memcpy(&gap_env, p_init, sizeof(struct ns_gap_params_t));
+
+    //generate local IRK
+    uint8_t tmp_irk[KEY_LEN];
+    memcpy(&tmp_irk[0], SEC_DEFAULT_IRK, KEY_LEN);
+
+    for(uint8_t i = 0; i < BD_ADDR_LEN; i++)
+        tmp_irk[i] |= gap_env.mac_addr.addr[i];
+
+    memcpy(&app_env.loc_irk[0], &tmp_irk[0], KEY_LEN);
+    //set ble address
+    memcpy(g_co_default_bdaddr.addr, &gap_env.mac_addr, BD_ADDR_LEN);
+}
+
+void ns_ble_adv_init(struct ns_adv_params_t const* p_init)
+{
+    if(p_init != NULL)
+        memcpy(&adv_env, p_init, sizeof(struct ns_adv_params_t));
+
+    if((adv_env.adv_data_len > ADV_DATA_LEN - 3)
+       && (adv_env.beacon_enable == false))
+        adv_env.adv_data_len = ADV_DATA_LEN - 3;
+
+    if(adv_env.scan_rsp_data_len > ADV_DATA_LEN)
+        adv_env.scan_rsp_data_len = ADV_DATA_LEN;
+
+    if(adv_env.ex_adv_data_len > EXT_ADV_DATA_MAX_LEN - 3)
+        adv_env.ex_adv_data_len = EXT_ADV_DATA_MAX_LEN - 3;
+}
+
+/**
+ *****************************************************************************************
+ * @brief update legacy advertising data
+ *
+ *****************************************************************************************
+ */
+bool ns_ble_adv_data_set(uint8_t* p_dat, uint16_t len)
+{
+    adv_env.adv_data_len = len;
+
+    if((adv_env.adv_data_len > ADV_DATA_LEN - 3)
+       && (adv_env.beacon_enable == false))
+        adv_env.adv_data_len = ADV_DATA_LEN - 3;
+
+    memcpy(adv_env.adv_data, p_dat, adv_env.adv_data_len);
+
+    if(app_env.adv_mode == APP_ADV_MODE_FAST ||
+       app_env.adv_mode == APP_ADV_MODE_SLOW)
+    {
+        app_set_adv_data();
+        app_env.current_op = 0xff; //cancel next step
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ *****************************************************************************************
+ * @brief update advertising scan response data
+ *
+ *****************************************************************************************
+ */
+bool ns_ble_scan_rsp_data_set(uint8_t* p_dat, uint16_t len)
+{
+    adv_env.scan_rsp_data_len = len;
+
+    if(adv_env.scan_rsp_data_len > ADV_DATA_LEN)
+        adv_env.scan_rsp_data_len = ADV_DATA_LEN;
+
+    memcpy(adv_env.scan_rsp_data, p_dat, adv_env.scan_rsp_data_len);
+
+    if(app_env.adv_mode == APP_ADV_MODE_FAST ||
+       app_env.adv_mode == APP_ADV_MODE_SLOW)
+    {
+        app_set_scan_rsp_data();
+        app_env.current_op = 0xff; //cancel next step
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ *****************************************************************************************
+ * @brief update extended advertising data
+ *
+ *****************************************************************************************
+ */
+bool ns_ble_ex_adv_data_set(uint8_t* p_dat, uint16_t len)
+{
+    adv_env.ex_adv_data_len = len;
+
+    if(adv_env.ex_adv_data_len > EXT_ADV_DATA_MAX_LEN - 3)
+        adv_env.ex_adv_data_len = EXT_ADV_DATA_MAX_LEN - 3;
+
+    adv_env.ex_adv_p_data = p_dat;
+
+    if(app_env.adv_mode == APP_ADV_MODE_FAST ||
+       app_env.adv_mode == APP_ADV_MODE_SLOW)
+    {
+        app_set_adv_data();
+        app_env.current_op = 0xff; //cancel next step
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ *****************************************************************************************
+ * @brief start advertising
+ *
+ *****************************************************************************************
+ */
+void ns_ble_adv_start(void)
+{
+    if (strict_scan.enabled && ns_ble_scan_transition_pending())
+    {
+        if (strict_scan.adv_intent != 3u)
+            strict_scan.adv_intent = (strict_scan.adv_intent == 2u) ? 3u : 1u;
+        return;
+    }
+    if((app_env.adv_state == APP_ADV_STATE_STARTING) ||
+       (app_env.adv_state == APP_ADV_STATE_STARTED))
+        return;
+
+    if(app_env.adv_state == APP_ADV_STATE_STOPPING)
+    {
+        app_env.adv_mode = APP_ADV_MODE_ENABLE;
+        return;
+    }
+
+    switch(app_env.adv_mode)
+    {
+        case APP_ADV_MODE_IDLE:
+            //on idle mode then enable.
+            app_env.adv_mode = APP_ADV_MODE_ENABLE;
+            break;
+
+        case APP_ADV_MODE_ENABLE:
+        case APP_ADV_MODE_STOP:
+
+            //on ready mode then start
+            if(adv_env.directed_adv.enable)
+                app_env.adv_mode = APP_ADV_MODE_DIRECTED;
+            else if(adv_env.fast_adv.enable)
+                app_env.adv_mode = APP_ADV_MODE_FAST;
+            else if(adv_env.slow_adv.enable)
+                app_env.adv_mode = APP_ADV_MODE_SLOW;
+            else
+                app_env.adv_mode = APP_ADV_MODE_STOP;
+
+            app_create_advertising();
+            break;
+
+        default:
+            //on started mode do nothing
+            break;
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief stop advertising
+ *
+ *****************************************************************************************
+ */
+void ns_ble_adv_stop(void)
+{
+    if (strict_scan.enabled && ns_ble_scan_transition_pending())
+    {
+        strict_scan.adv_intent = 2u;
+        return;
+    }
+    switch(app_env.adv_mode)
+    {
+        case APP_ADV_MODE_IDLE:
+        case APP_ADV_MODE_ENABLE:
+            //on idle and enable mode then disable
+            app_env.adv_mode = APP_ADV_MODE_STOP;
+            break;
+
+        case APP_ADV_MODE_STOP:
+            //on stop mode then do nothing
+            break;
+
+        case APP_ADV_MODE_DIRECTED:
+        case APP_ADV_MODE_FAST:
+        case APP_ADV_MODE_SLOW:
+        default:
+            //on started mode then stop
+            app_env.adv_mode = APP_ADV_MODE_STOP;
+            app_stop_advertising();
+            break;
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief disconnect the connection
+ *
+ *****************************************************************************************
+ */
+void ns_ble_disconnect(void)
+{
+    struct gapc_disconnect_cmd *p_cmd = KE_MSG_ALLOC(GAPC_DISCONNECT_CMD,
+                                        KE_BUILD_ID(TASK_GAPC, app_env.conidx), TASK_APP,
+                                        gapc_disconnect_cmd);
+    NS_LOG_DEBUG("%s\r\n", __func__);
+    p_cmd->operation = GAPC_DISCONNECT;
+    p_cmd->reason    = CO_ERROR_REMOTE_USER_TERM_CON;
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+/* Master device API*/
+
+void ns_ble_scan_init(struct ns_scan_params_t *p_init)
+{
+    if(p_init != NULL)
+        memcpy(&scan_env, p_init, sizeof(struct ns_scan_params_t));
+}
+
+/**
+ *****************************************************************************************
+ * @brief create scan activity
+ *
+ *****************************************************************************************
+ */
+
+void ns_ble_scan_strict_enable(void)
+{
+    strict_scan.enabled = 1u;
+}
+
+bool ns_ble_scan_transition_pending(void)
+{
+    return strict_scan.enabled &&
+           ((strict_scan.phase == STRICT_SCAN_CREATING) ||
+            (strict_scan.phase == STRICT_SCAN_STARTING) ||
+            (strict_scan.phase == STRICT_SCAN_STOPPING) ||
+            (strict_scan.phase == STRICT_SCAN_DELETING));
+}
+
+bool ns_ble_adv_operation_pending(void)
+{
+    return adv_pending_operation != 0xFFu;
+}
+
+void ns_ble_adv_operation_complete(uint8_t operation)
+{
+    if (adv_pending_operation == operation)
+        adv_pending_operation = 0xFFu;
+}
+
+/* An incoming phone connection can stop advertising during scan CREATE/START. */
+bool ns_ble_scan_defer_adv_stopped(void)
+{
+    if (!strict_scan.enabled || !ns_ble_scan_transition_pending())
+        return false;
+    strict_scan.adv_stopped_pending = 1u;
+    return true;
+}
+
+static void strict_scan_idle(void)
+{
+    strict_scan.phase = STRICT_SCAN_IDLE;
+    strict_scan.stop_requested = 0u;
+    strict_scan.stopped_seen = 0u;
+    strict_scan.stop_completed = 0u;
+    scan_env.scan_enable = false;
+    app_env.current_op = CURRENT_OP_NULL;
+    ns_ble_scan_strict_process();
+    if (scan_env.ble_scan_state_handler != NULL)
+        scan_env.ble_scan_state_handler(SCAN_STATE_IDLE);
+}
+
+void ns_ble_scan_strict_process(void)
+{
+    if (!strict_scan.enabled || ns_ble_scan_transition_pending() ||
+        ns_ble_adv_operation_pending())
+        return;
+
+    if (strict_scan.adv_stopped_pending)
+    {
+        strict_scan.adv_stopped_pending = 0u;
+        if (app_env.adv_state == APP_ADV_STATE_STARTED)
+        {
+            app_env.adv_state = APP_ADV_STATE_STOPPING;
+            ns_ble_adv_fsm_next();
+            return;
+        }
+    }
+    if (strict_scan.adv_intent != 0u)
+    {
+        uint8_t intent = strict_scan.adv_intent;
+        strict_scan.adv_intent = (intent == 3u) ? 1u : 0u;
+        if (intent == 1u)
+            ns_ble_adv_start();
+        else
+            ns_ble_adv_stop();
+        if (ns_ble_adv_operation_pending() || (strict_scan.adv_intent != 0u))
+            return;
+    }
+    if (strict_scan.phase == STRICT_SCAN_CREATED)
+    {
+        if (strict_scan.stop_requested)
+            ns_ble_delete_scan();
+        else
+        {
+            scan_env.scan_enable = true;
+            ns_ble_start_scan();
+        }
+    }
+    else if (strict_scan.phase == STRICT_SCAN_STOPPED)
+        ns_ble_delete_scan();
+    else if ((strict_scan.phase == STRICT_SCAN_ACTIVE) && strict_scan.stop_requested)
+        ns_ble_stop_scan();
+}
+
+/* True means this completion belongs to the opt-in scan lifecycle. */
+bool ns_ble_scan_strict_cmp(uint8_t operation, uint8_t status)
+{
+    if (!strict_scan.enabled)
+        return false;
+
+    if ((strict_scan.phase == STRICT_SCAN_CREATING) &&
+        (operation == GAPM_CREATE_SCAN_ACTIVITY))
+    {
+        app_env.current_op = CURRENT_OP_NULL;
+        if (app_env.scan_actv_idx == 0xFFu)
+            strict_scan_idle();
+        else
+        {
+            strict_scan.phase = STRICT_SCAN_CREATED;
+            if (status != CO_ERROR_NO_ERROR)
+                strict_scan.stop_requested = 1u;
+        }
+    }
+    else if ((strict_scan.phase == STRICT_SCAN_STARTING) &&
+             (operation == GAPM_START_ACTIVITY))
+    {
+        app_env.current_op = CURRENT_OP_NULL;
+        if ((status != CO_ERROR_NO_ERROR) || strict_scan.stopped_seen)
+        {
+            strict_scan.phase = STRICT_SCAN_STOPPED;
+            strict_scan.stop_requested = 1u;
+        }
+        else
+        {
+            strict_scan.phase = STRICT_SCAN_ACTIVE;
+            if (!strict_scan.stop_requested && scan_env.ble_scan_state_handler != NULL)
+                scan_env.ble_scan_state_handler(SCAN_STATE_SCANING);
+        }
+    }
+    else if ((strict_scan.phase == STRICT_SCAN_STOPPING) &&
+             (operation == GAPM_STOP_ACTIVITY))
+    {
+        app_env.current_op = CURRENT_OP_NULL;
+        strict_scan.stop_completed = 1u;
+        if (strict_scan.stopped_seen)
+            strict_scan.phase = STRICT_SCAN_STOPPED;
+        else if (status != CO_ERROR_NO_ERROR)
+        {
+            if (strict_scan.stop_retries++ < STRICT_SCAN_RETRY_LIMIT)
+                strict_scan.phase = STRICT_SCAN_ACTIVE;
+            else
+            {
+                strict_scan.phase = STRICT_SCAN_FAILED;
+                strict_scan.failed_operation = GAPM_STOP_ACTIVITY;
+            }
+        }
+    }
+    else if ((strict_scan.phase == STRICT_SCAN_DELETING) &&
+             (operation == GAPM_DELETE_ACTIVITY))
+    {
+        app_env.current_op = CURRENT_OP_NULL;
+        if (status == CO_ERROR_NO_ERROR)
+        {
+            app_env.scan_actv_idx = 0xFFu;
+            strict_scan_idle();
+        }
+        else if (strict_scan.delete_retries++ < STRICT_SCAN_RETRY_LIMIT)
+            strict_scan.phase = STRICT_SCAN_STOPPED;
+        else
+        {
+            strict_scan.phase = STRICT_SCAN_FAILED;
+            strict_scan.failed_operation = GAPM_DELETE_ACTIVITY;
+        }
+    }
+    else
+        return false;
+
+    ns_ble_scan_strict_process();
+    return true;
+}
+
+bool ns_ble_scan_strict_stopped(uint8_t activity_index)
+{
+    if (!strict_scan.enabled || (app_env.scan_actv_idx != activity_index))
+        return false;
+    strict_scan.stopped_seen = 1u;
+    strict_scan.stop_requested = 1u;
+    if ((strict_scan.phase == STRICT_SCAN_ACTIVE) ||
+        ((strict_scan.phase == STRICT_SCAN_STOPPING) && strict_scan.stop_completed) ||
+        ((strict_scan.phase == STRICT_SCAN_FAILED) &&
+         (strict_scan.failed_operation == GAPM_STOP_ACTIVITY)))
+        strict_scan.phase = STRICT_SCAN_STOPPED;
+    ns_ble_scan_strict_process();
+    return true;
+}
+
+void ns_ble_create_scan(void)
+{
+    NS_LOG_DEBUG("%s\r\n", __func__);
+
+    if(app_env.scan_actv_idx == 0xFF)
+    {
+        if (strict_scan.enabled)
+        {
+            if (strict_scan.phase != STRICT_SCAN_IDLE)
+                return;
+            strict_scan.phase = STRICT_SCAN_CREATING;
+            app_env.current_op = CURRENT_OP_CREATE_SCAN;
+        }
+        // Prepare the GAPM_ACTIVITY_CREATE_CMD message
+        struct gapm_activity_create_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_CREATE_CMD,
+            TASK_GAPM, TASK_APP,
+            gapm_activity_create_cmd);
+        // Set operation code
+        p_cmd->operation = GAPM_CREATE_SCAN_ACTIVITY;
+        // Fill the allocated kernel message
+        p_cmd->own_addr_type = gap_env.mac_addr_type;//GAPM_STATIC_ADDR;
+        // Send the message
+        ke_msg_send(p_cmd);
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief start scan
+ *
+ *****************************************************************************************
+ */
+void ns_ble_start_scan(void)
+{
+    if (strict_scan.enabled)
+    {
+        if (strict_scan.phase == STRICT_SCAN_IDLE)
+        {
+            strict_scan.stop_requested = 0u;
+            strict_scan.stopped_seen = 0u;
+            strict_scan.stop_completed = 0u;
+            strict_scan.stop_retries = 0u;
+            strict_scan.delete_retries = 0u;
+            if (app_env.scan_actv_idx == 0xFFu)
+            {
+                ns_ble_create_scan();
+                return;
+            }
+            strict_scan.phase = STRICT_SCAN_CREATED;
+        }
+        if ((strict_scan.phase != STRICT_SCAN_CREATED) || strict_scan.stop_requested)
+            return;
+        strict_scan.phase = STRICT_SCAN_STARTING;
+    }
+    NS_LOG_DEBUG("%s,%x\r\n", __func__, app_env.scan_actv_idx);
+
+    if(app_env.scan_actv_idx == 0xFF)
+    {
+        scan_env.scan_enable = true;
+        //creat scan active if not created yet
+        ns_ble_create_scan();
+        return;
+    }
+    else if(!scan_env.scan_enable)
+    {
+        //scan already started
+        return;
+    }
+
+    scan_env.scan_enable = false;
+    app_env.wl_reconnect = false;
+    // Prepare the GAPM_ACTIVITY_START_CMD message
+    struct gapm_activity_start_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_START_CMD,
+                                            TASK_GAPM, TASK_APP,
+                                            gapm_activity_start_cmd);
+    p_cmd->operation = GAPM_START_ACTIVITY;
+    p_cmd->actv_idx = app_env.scan_actv_idx;
+    p_cmd->u_param.scan_param.type                      = scan_env.type;
+    p_cmd->u_param.scan_param.dup_filt_pol              = scan_env.dup_filt_pol;
+    p_cmd->u_param.scan_param.scan_param_1m.scan_intv   = scan_env.scan_intv;
+    p_cmd->u_param.scan_param.scan_param_1m.scan_wd     = scan_env.scan_wd;
+    p_cmd->u_param.scan_param.duration                  = scan_env.duration;
+    p_cmd->u_param.scan_param.period                    = scan_env.period;
+    //scan 1M as default
+    p_cmd->u_param.scan_param.prop                      = GAPM_SCAN_PROP_PHY_1M_BIT;
+    llhwc_modem_setmode(GAP_PHY_1MBPS);
+
+    if(scan_env.phy_coded_enable)
+    {
+        p_cmd->u_param.scan_param.prop                        |= GAPM_SCAN_PROP_PHY_CODED_BIT;
+        p_cmd->u_param.scan_param.scan_param_coded.scan_intv   = scan_env.scan_intv;
+        p_cmd->u_param.scan_param.scan_param_coded.scan_wd     = scan_env.scan_wd;
+        llhwc_modem_setmode(GAP_PHY_CODED);
+    }
+
+    if(scan_env.prop_active_enable)
+        p_cmd->u_param.scan_param.prop |= GAPM_SCAN_PROP_ACTIVE_1M_BIT | GAPM_SCAN_PROP_ACTIVE_CODED_BIT;
+
+    app_env.current_op      = CURRENT_OP_START_SCAN;
+    app_env.target_found    = false;
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief delete scan activity
+ *
+ *****************************************************************************************
+ */
+void ns_ble_delete_scan(void)
+{
+    if (strict_scan.enabled)
+    {
+        if ((strict_scan.phase != STRICT_SCAN_CREATED) &&
+            (strict_scan.phase != STRICT_SCAN_STOPPED))
+            return;
+        strict_scan.phase = STRICT_SCAN_DELETING;
+    }
+    NS_LOG_DEBUG("%s\r\n", __func__);
+
+    if(app_env.scan_actv_idx != 0xff)
+    {
+        struct gapm_activity_delete_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_DELETE_CMD,
+            TASK_GAPM, TASK_APP,
+            gapm_activity_delete_cmd);
+        // Set operation code
+        p_cmd->operation = GAPM_DELETE_ACTIVITY;
+        p_cmd->actv_idx = app_env.scan_actv_idx;
+        app_env.current_op = CURRENT_OP_DELETE_SCAN;
+        if (!strict_scan.enabled)
+            app_env.scan_actv_idx = 0xFF;
+        // Send the message
+        ke_msg_send(p_cmd);
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief stop scan
+ *
+ *****************************************************************************************
+ */
+void ns_ble_stop_scan(void)
+{
+    if (strict_scan.enabled)
+    {
+        strict_scan.stop_requested = 1u;
+        scan_env.scan_enable = false;
+        if (strict_scan.phase == STRICT_SCAN_IDLE)
+        {
+            strict_scan_idle();
+            return;
+        }
+        if (strict_scan.phase == STRICT_SCAN_FAILED)
+        {
+            strict_scan.stop_retries = 0u;
+            strict_scan.delete_retries = 0u;
+            strict_scan.phase = (strict_scan.failed_operation == GAPM_DELETE_ACTIVITY) ?
+                                STRICT_SCAN_STOPPED : STRICT_SCAN_ACTIVE;
+        }
+        if (strict_scan.phase != STRICT_SCAN_ACTIVE)
+        {
+            ns_ble_scan_strict_process();
+            return;
+        }
+        if (ns_ble_adv_operation_pending())
+            return;
+        strict_scan.phase = STRICT_SCAN_STOPPING;
+        strict_scan.stop_completed = 0u;
+    }
+    NS_LOG_DEBUG("%s,%x\r\n", __func__, app_env.scan_actv_idx);
+
+    if(app_env.scan_actv_idx != 0xff &&
+       (strict_scan.enabled || app_env.current_op != CURRENT_OP_STOP_SCAN))
+    {
+        struct gapm_activity_stop_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_STOP_CMD,
+                                               TASK_GAPM, TASK_APP,
+                                               gapm_activity_stop_cmd);
+        // Set operation code
+        p_cmd->operation = GAPM_STOP_ACTIVITY;
+        p_cmd->actv_idx = app_env.scan_actv_idx;
+        app_env.current_op = CURRENT_OP_STOP_SCAN;
+        // Send the message
+        ke_msg_send(p_cmd);
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief create init activity
+ *
+ *****************************************************************************************
+ */
+void ns_ble_create_init(void)
+{
+    NS_LOG_DEBUG("%s\r\n", __func__);
+
+    if(app_env.init_actv_idx == 0xFF)
+    {
+        // Prepare the GAPM_ACTIVITY_CREATE_CMD message
+        struct gapm_activity_create_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_CREATE_CMD,
+            TASK_GAPM, TASK_APP,
+            gapm_activity_create_cmd);
+        // Set operation code
+        p_cmd->operation = GAPM_CREATE_INIT_ACTIVITY;
+        // Fill the allocated kernel message
+        p_cmd->own_addr_type = gap_env.mac_addr_type;
+        app_env.current_op = CURRENT_OP_CREATE_INIT;
+        // Send the message
+        ke_msg_send(p_cmd);
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief start init for connection
+ *
+ *****************************************************************************************
+ */
+void ns_ble_start_init(uint8_t *addr, uint8_t addr_type)
+{
+    NS_LOG_DEBUG("%s,%x\r\n", __func__, app_env.init_actv_idx);
+
+    if(app_env.init_actv_idx == 0xFF)
+    {
+        //creat init active if not created yet
+        ns_ble_create_init();
+        app_env.target_addr_type = addr_type;
+        memcpy(app_env.target_addr.addr, addr, 6);
+        app_env.target_found    = true;
+        scan_env.connect_enable = true;
+        return;
+    }
+
+    //set init timeout timer
+    if(scan_env.initiating_timeout)
+        ke_timer_set(APP_INIT_TIMEOUT_EVT, TASK_APP, scan_env.initiating_timeout);
+
+    // Prepare the GAPM_ACTIVITY_START_CMD message
+    struct gapm_activity_start_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_START_CMD,
+                                            TASK_GAPM, TASK_APP,
+                                            gapm_activity_start_cmd);
+    p_cmd->operation = GAPM_START_ACTIVITY;
+    p_cmd->actv_idx = app_env.init_actv_idx;
+
+    if(app_env.wl_reconnect)
+    {
+        p_cmd->u_param.init_param.type = GAPM_INIT_TYPE_AUTO_CONN_EST;
+        p_cmd->u_param.init_param.conn_to = 0;
+        app_env.wl_reconnect = false;
+    }
+    else
+    {
+        p_cmd->u_param.init_param.type = GAPM_INIT_TYPE_DIRECT_CONN_EST;
+        p_cmd->u_param.init_param.conn_to = 0;
+    }
+
+    p_cmd->u_param.init_param.prop = GAPM_INIT_PROP_1M_BIT;
+    p_cmd->u_param.init_param.scan_param_1m.scan_intv       = 0x320;
+    p_cmd->u_param.init_param.scan_param_1m.scan_wd         = 0x320;
+    p_cmd->u_param.init_param.conn_param_1m.conn_intv_min   = gap_env.dev_conn_param.intv_min;
+    p_cmd->u_param.init_param.conn_param_1m.conn_intv_max   = gap_env.dev_conn_param.intv_max;
+    p_cmd->u_param.init_param.conn_param_1m.conn_latency    = gap_env.dev_conn_param.latency;
+    p_cmd->u_param.init_param.conn_param_1m.supervision_to  = gap_env.dev_conn_param.time_out;
+    p_cmd->u_param.init_param.conn_param_1m.ce_len_min      = 0;
+    p_cmd->u_param.init_param.conn_param_1m.ce_len_max      = 0x140;
+
+    if(scan_env.phy_coded_enable)
+    {
+        p_cmd->u_param.init_param.prop |= GAPM_INIT_PROP_CODED_BIT;
+        p_cmd->u_param.init_param.scan_param_coded.scan_intv       = 0x320;
+        p_cmd->u_param.init_param.scan_param_coded.scan_wd         = 0x320;
+        p_cmd->u_param.init_param.conn_param_coded.conn_intv_min   = gap_env.dev_conn_param.intv_min;
+        p_cmd->u_param.init_param.conn_param_coded.conn_intv_max   = gap_env.dev_conn_param.intv_max;
+        p_cmd->u_param.init_param.conn_param_coded.conn_latency    = gap_env.dev_conn_param.latency;
+        p_cmd->u_param.init_param.conn_param_coded.supervision_to  = gap_env.dev_conn_param.time_out;
+        p_cmd->u_param.init_param.conn_param_coded.ce_len_min      = 0;
+        p_cmd->u_param.init_param.conn_param_coded.ce_len_max      = 0x140;
+    }
+
+    p_cmd->u_param.init_param.peer_addr.addr_type = addr_type;
+    memcpy(p_cmd->u_param.init_param.peer_addr.addr.addr, addr, 6);
+
+    if(p_cmd->u_param.init_param.prop & GAPM_INIT_PROP_2M_BIT)
+        llhwc_modem_setmode(GAP_PHY_2MBPS);
+    else if(p_cmd->u_param.init_param.prop & GAPM_INIT_PROP_CODED_BIT)
+        llhwc_modem_setmode(GAP_PHY_CODED);
+    else
+        llhwc_modem_setmode(GAP_PHY_1MBPS);
+
+    app_env.current_op = CURRENT_OP_START_INIT;
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief cancel the init of connection
+ *
+ *****************************************************************************************
+ */
+void ns_ble_stop_init(void)
+{
+    NS_LOG_DEBUG("%s,init_actv_idx = 0x%x\r\n", __func__, app_env.init_actv_idx);
+    /* Cancel the intent even while CREATE has not returned an activity index.
+     * Its completion will delete the unused activity instead of starting it. */
+    app_env.target_found = false;
+    scan_env.connect_enable = false;
+
+    if((app_env.init_actv_idx != 0xFF) &&
+       (app_env.current_op != CURRENT_OP_CREATE_INIT) &&
+       (app_env.current_op != CURRENT_OP_DELETE_INIT))
+    {
+        struct gapm_activity_stop_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_STOP_CMD,
+                                               TASK_GAPM, TASK_APP,
+                                               gapm_activity_stop_cmd);
+        // Set operation code
+        p_cmd->operation = GAPM_STOP_ACTIVITY;
+        p_cmd->actv_idx  = app_env.init_actv_idx;
+        app_env.current_op = CURRENT_OP_STOP_INIT;
+        // Send the message
+        ke_msg_send(p_cmd);
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief delete the init activity
+ *
+ *****************************************************************************************
+ */
+void ns_ble_delete_init(void)
+{
+    NS_LOG_DEBUG("%s\r\n", __func__);
+
+    if((app_env.init_actv_idx != 0xFF) &&
+       (app_env.current_op != CURRENT_OP_DELETE_INIT))
+    {
+        struct gapm_activity_delete_cmd *p_cmd = KE_MSG_ALLOC(GAPM_ACTIVITY_DELETE_CMD,
+            TASK_GAPM, TASK_APP,
+            gapm_activity_delete_cmd);
+        // Set operation code
+        p_cmd->operation = GAPM_DELETE_ACTIVITY;
+        p_cmd->actv_idx  = app_env.init_actv_idx;
+        /* Keep the activity index until DELETE succeeds. A rejected command
+         * must not make a live/allocated activity appear to be idle. */
+        app_env.current_op = CURRENT_OP_DELETE_INIT;
+        // Send the message
+        ke_msg_send(p_cmd);
+    }
+}
+
+/**
+ *****************************************************************************************
+ * @brief check the target data from the scan data .
+ *
+ *****************************************************************************************
+ */
+bool ns_ble_scan_data_find(uint8_t types, const uint8_t *p_filter_data, uint8_t *p_data, uint8_t len)
+{
+    uint8_t pack_len;
+    uint8_t pack_type;
+
+    while(len)
+    {
+        // check if pack incomplete
+        if(len < (*p_data) +1 || len < 3)
+            break;
+
+        pack_len = (*p_data) -1; // get pack len
+        p_data++;
+        pack_type = *p_data; // get pack type
+        p_data++;
+
+        if(pack_type == types) //
+        {
+            if(memcmp(p_data, p_filter_data, pack_len) == 0)
+                return true;
+        }
+
+        p_data += pack_len; //next pack
+        len    -= (pack_len + 2);
+    }
+
+    return false;
+}
+
+/* Used before the operation of connection like set connection parameter,send data etc*/
+/**
+ *****************************************************************************************
+ * @brief Set the conidx of operation
+ * @param[in] conidx:  target connection index
+ *
+ *****************************************************************************************
+ */
+void ns_ble_set_active_connection(uint8_t  conidx)
+{
+    app_env.conidx = conidx;
+}
+
+/**
+ *****************************************************************************************
+ * @brief get the current active conidx
+ *
+ *****************************************************************************************
+ */
+uint8_t ns_ble_get_active_connection(void)
+{
+    return app_env.conidx;
+}
+
+/**
+ *****************************************************************************************
+ * @brief get the connection state of conidx
+ *
+ * @param[in] conidx:  connection index
+ * @note check the connection state by conidx: true is connected,false is disconnected
+ *****************************************************************************************
+ */
+bool ns_ble_get_connection_state(uint8_t conidx)
+{
+    bool status = false;
+
+    if((app_env.conn_env[conidx].conidx != GAP_INVALID_CONIDX) && (conidx < APP_CON_IDX_MAX))
+        status = true;
+
+    return status;
+}
+
+/**
+ *****************************************************************************************
+ * @brief get total connection number
+ *
+ *****************************************************************************************
+ */
+uint8_t ns_ble_get_connection_num(void)
+{
+    uint8_t  conidx_cnt = 0;
+
+    for(uint8_t i = 0; i < APP_CON_IDX_MAX; i++)
+    {
+        if(app_env.conn_env[i].conidx != GAP_INVALID_CONIDX)
+            conidx_cnt ++;
+    }
+
+    return conidx_cnt;
+}
+
+/**
+ *****************************************************************************************
+ * @brief get the conidx by role (use at one master one slave example only)
+ *
+ * @param[in] role:  ROLE_MASTER or ROLE_SLAVE
+ *****************************************************************************************
+ */
+uint8_t ns_ble_get_conidx_by_role(uint8_t role)
+{
+    uint8_t  conidx = GAP_INVALID_CONIDX;
+
+    for(uint8_t i = 0; i < APP_CON_IDX_MAX; i++)
+    {
+        if((app_env.conn_env[i].conidx != GAP_INVALID_CONIDX) && (app_env.conn_env[i].role == role))
+        {
+            conidx = app_env.conn_env[i].conidx;
+            break;
+        }
+    }
+
+    return conidx;
+}
+
+/**
+ *****************************************************************************************
+ * @brief get master connection number
+ *
+ *****************************************************************************************
+ */
+uint8_t ns_ble_master_connection_num(void)
+{
+    uint8_t  conidx_cnt = 0;
+
+    for(uint8_t i = 0; i < APP_CON_IDX_MAX; i++)
+    {
+        if((app_env.conn_env[i].conidx != GAP_INVALID_CONIDX) && (app_env.conn_env[i].role == ROLE_MASTER))
+            conidx_cnt ++;
+    }
+
+    return conidx_cnt;
+}
+
+/**
+ *****************************************************************************************
+ * @brief get slave connection number
+ *
+ *****************************************************************************************
+ */
+uint8_t ns_ble_slave_connection_num(void)
+{
+    uint8_t  conidx_cnt = 0;
+
+    for(uint8_t i = 0; i < APP_CON_IDX_MAX; i++)
+    {
+        if((app_env.conn_env[i].conidx != GAP_INVALID_CONIDX) && (app_env.conn_env[i].role == ROLE_SLAVE))
+            conidx_cnt ++;
+    }
+
+    return conidx_cnt;
+}
+
+/**
+ *****************************************************************************************
+ * @brief Resolve the bonded peer device RPA address .
+ *
+ * @param[in] irk:  Pointer to the peer IRK.
+ * @param[in] nb_key:  number of IRK.
+ * @param[in] addr:  peer RPA address.
+ *****************************************************************************************
+ */
+void ns_ble_resolv_addr(struct gap_sec_key *irk, uint8_t nb_key, struct bd_addr* addr)
+{
+    // Prepare the GAPM_RESOLV_ADDR_CMD message
+    struct gapm_resolv_addr_cmd *p_cmd = KE_MSG_ALLOC_DYN(GAPM_RESOLV_ADDR_CMD,
+                                         TASK_GAPM, TASK_APP,
+                                         gapm_resolv_addr_cmd, KEY_LEN * nb_key);
+    // Set operation code
+    p_cmd->operation  = GAPM_RESOLV_ADDR;
+    p_cmd->nb_key  = nb_key;
+    memcpy(&(p_cmd->addr.addr[0]), addr, sizeof(bd_addr_t));
+    memcpy(&(p_cmd->irk[0]), irk, KEY_LEN * nb_key);
+    NS_LOG_DEBUG("%s\r\n", __func__);
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief Set the resolving list .
+ *
+ * @param[in] ral_list:  Pointer to RAL list.
+ * @param[in] nb_key:  number of RAL .
+ *****************************************************************************************
+ */
+void ns_ble_list_set_ral(struct gap_ral_dev_info *ral_list, uint8_t ral_cnt)
+{
+    struct gapm_list_set_ral_cmd *p_cmd = KE_MSG_ALLOC_DYN(GAPM_LIST_SET_CMD,
+                                          TASK_GAPM, TASK_APP,
+                                          gapm_list_set_ral_cmd,
+                                          (ral_cnt * sizeof(struct gap_ral_dev_info)));
+    NS_LOG_DEBUG("%s,ral_cnt:%d\r\n", __func__, ral_cnt);
+    p_cmd->operation = GAPM_SET_RAL;
+    p_cmd->size = ral_cnt;
+
+    for(uint8_t cnt = 0; cnt < ral_cnt; cnt++)
+    {
+        ral_list[cnt].priv_mode = 0;
+        memcpy(&p_cmd->ral_info[cnt], &ral_list[cnt], sizeof(struct gap_ral_dev_info));
+        NS_LOG_DEBUG("set_ral:%d,%d,%d,%d,%d\r\n", ral_list[cnt].priv_mode, \
+                     ral_list[cnt].local_irk[0], \
+                     ral_list[cnt].peer_irk[0], \
+                     ral_list[cnt].addr.addr_type, \
+                     ral_list[cnt].addr.addr.addr[0]);
+    }
+
+    ke_msg_send(p_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief Set the White list .
+ *
+ * @param[in] ral_list:  Pointer to White list.
+ * @param[in] nb_key:  number of White list.
+ *****************************************************************************************
+ */
+void ns_ble_list_set_wl(struct gap_bdaddr *wl_addr, uint8_t wl_cnt)
+{
+    struct gapm_list_set_wl_cmd *p_cmd = KE_MSG_ALLOC_DYN(GAPM_LIST_SET_CMD,
+                                         TASK_GAPM, TASK_APP,
+                                         gapm_list_set_wl_cmd,
+                                         wl_cnt * sizeof(struct gap_bdaddr));
+    NS_LOG_DEBUG("%s,wl_cnt:%d\r\n", __func__, wl_cnt);
+    p_cmd->operation = GAPM_SET_WL;
+    p_cmd->size = wl_cnt;
+
+    for(uint8_t cnt = 0; cnt < wl_cnt; cnt++)
+    {
+        memcpy(&p_cmd->wl_info[cnt], &wl_addr[cnt], sizeof(struct gap_bdaddr));
+        NS_LOG_DEBUG("set_wl:%x,%x,%x,%x,%x,%x;addr type: %d\r\n", wl_addr[cnt].addr.addr[0], \
+                     wl_addr[cnt].addr.addr[1], \
+                     wl_addr[cnt].addr.addr[2], \
+                     wl_addr[cnt].addr.addr[3], \
+                     wl_addr[cnt].addr.addr[4], \
+                     wl_addr[cnt].addr.addr[5], \
+                     wl_addr[cnt].addr_type);
+    }
+
+    ke_msg_send(p_cmd);
+}
+
+/**
+ *****************************************************************************************
+ * @brief Set channel map .
+ *
+ * @param[in] newchmap:  channel map configuration .
+ *****************************************************************************************
+ */
+void ns_ble_set_channel_map(uint8_t* newchmap)
+{
+    NS_LOG_DEBUG("%s\r\n", __func__);
+    struct gapm_set_channel_map_cmd *p_cmd = KE_MSG_ALLOC(GAPM_SET_CHANNEL_MAP_CMD,
+        TASK_GAPM, TASK_APP,
+        gapm_set_channel_map_cmd);
+    // Set operation code
+    p_cmd->operation = GAPM_SET_CHANNEL_MAP;
+    memcpy(&(p_cmd->chmap.map), newchmap, sizeof(le_chnl_map_t));
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+
+/**
+ *****************************************************************************************
+ * @brief enter rf test mode
+ *
+ *****************************************************************************************
+ */
+void ns_ble_prod_test_cmd_send(struct gapm_le_test_mode_ctrl_cmd *p_params, bool cw_mode)
+{
+    struct gapm_le_test_mode_ctrl_cmd *p_cmd = KE_MSG_ALLOC(GAPM_LE_TEST_MODE_CTRL_CMD,
+        TASK_GAPM, TASK_APP,
+        gapm_le_test_mode_ctrl_cmd);
+
+    if(cw_mode)
+    {
+        REG32(MODEM_BASE + 0xc6 * 4)  = 0;
+        REG32(MODEM_BASE + 0xc7 * 4)  = 0;
+        REG32(MODEM_BASE + 0xc8 * 4)  = 0;
+#ifndef INFTRX
+        ble_rftestcntl_infinitetx_setf(1);
+        p_params->tx_pkt_payload = 0;
+#endif
+        p_params->operation = GAPM_LE_TEST_TX_START;
+    }
+    else
+    {
+#ifdef INFTRX
+        ble_rftestcntl_infinitetx_setf(1);
+        p_params->tx_pkt_payload = 0;
+#endif
+    }
+
+    memcpy(p_cmd, p_params, sizeof(struct gapm_le_test_mode_ctrl_cmd));
+    llhwc_modem_setmode(p_params->phy);
+    // Send the message
+    ke_msg_send(p_cmd);
+}
+
+
+
+/**
+ * @brief  set the radio fact frequency to calibrate it.
+ * @param  fact_freq: the fact frequency test in CW mode, uint is Hz.
+ * @param  std_freq: the standard frequency shoud get in CW mode.
+ * @return void
+ * @note   for example: you can use RFTest example to test the CW in 0 channel,
+ *         it should be 2402000000 Hz, but we get 2401950000, it meam it offset 50k Hz.
+ *         We can call the function: ns_ble_radio_calibration(2401950000, 2402000000);
+ */
+void ns_ble_radio_calibration(uint32_t fact_freq, uint32_t std_freq)
+{
+    float    Ndiv = (float)std_freq / 8000000;
+    uint32_t mco_freq = fact_freq / Ndiv;
+    extern void radio_hse_mco_set(uint32_t mco_freq);
+    radio_hse_mco_set(mco_freq);
+}
+
+/**
+ * @brief  set the radio tx power.
+ * @param  tx_pwr: the power value to set, it can be set as below.
+            TX_POWER_0_DBM
+            TX_POWER_Neg2_DBM
+            TX_POWER_Neg4_DBM
+            TX_POWER_Neg8_DBM
+            TX_POWER_Neg15_DBM
+            TX_POWER_Neg20_DBM
+            TX_POWER_Pos2_DBM
+            TX_POWER_Pos3_DBM
+            TX_POWER_Pos4_DBM
+            TX_POWER_Pos6_DBM
+ * @return
+ * @note
+ */
+void ns_ble_radio_power_set(rf_tx_power_t tx_pwr)
+{
+    rf_tx_power_set(tx_pwr);
+}
+
+/**
+ * @brief  Config the peripheral.
+ * @param
+ * @return
+ * @note
+ */
+void ns_peripheral_config(void)
+{
+    while(!(RCC->CTRL & RCC_CTRL_HSERDF)); //wait HSE ready
+
+    ns_ble_lsc_config(app_env.lsc_cfg);
+
+    /* Check if the system has resumed from IWDG reset */
+    if(((RCC->CTRLSTS & (RCC_CTRLSTS_PORRSTF | RCC_CTRLSTS_IWDGRSTF)) == RCC_CTRLSTS_IWDGRSTF))
+    {
+        /* IWDGRST flag set*/
+        NS_LOG_WARNING("IWDGRST is set, reset from IWDG!!!\r\n");
+    }
+
+    /* Clear reset flags */
+    RCC->CTRLSTS |= RCC_CTRLSTS_RMRSTF;
+    RCC->CTRLSTS &= ~RCC_CTRLSTS_RMRSTF;
+    ip_enbpreset_pack(0x0D, 0x0D, 0x08);  //400us
+}
+
+/**
+ *****************************************************************************************
+ * @brief lsi calibration
+ *
+ *****************************************************************************************
+ */
+uint32_t ns_calib_lsi_clk(void) //32K
+{
+    uint32_t  min = 0;
+    uint32_t  max = 2047;
+    uint32_t  mid = 1024;////(RCC->LSCTRL >> 8) & 0x7FF;
+    uint32_t  delta = 0;
+    int count_value = 0;
+    uint32_t while_to = 100;
+
+    while(while_to--)
+    {
+        if((RCC->OSCFCSR & 0x01))
+            break;
+
+        rom_delay_n_10us(10);
+    }
+
+    do
+    {
+        uint32_t temp  = RCC->LSCTRL & (~(0x7FF << 8));  // 32K TRIM 8-18 bit
+        RCC->LSCTRL = temp | (mid << 8);                 // clear and set TRIM value
+        RCC->OSCFCCR |= 0x1 ;                            // start lsi
+        uint32_t lsi_timeoutcnt = 0;
+
+        while(1)
+        {
+            rom_delay_n_10us(1);
+
+            if((RCC->OSCFCSR & 0x01))
+                break;
+
+            if(lsi_timeoutcnt++ > g_timeoutcnt)
+                return 0;
+        }
+
+        count_value = RCC->OSCFCLSICNT; //ready cnt value
+        delta = abs((int)(count_value - g_lsi_1_syscle_cal_value * g_lsi_count_n_syscle));
+
+        if(count_value >=  g_lsi_1_syscle_cal_value * g_lsi_count_n_syscle)
+            min = mid;
+        else
+            max = mid;
+
+        uint32_t tmp_trim = (min + max) / 2;
+
+        if(tmp_trim == mid)                 //0 and 127 if not used
+            break;
+
+        mid = tmp_trim;
+    }
+    while(delta > g_lsi_accuracy);
+
+    g_rc32k_trim = (RCC->LSCTRL >> 8) & 0x7FF;
+    return count_value / g_lsi_count_n_syscle;
+}
+
+/**
+ *****************************************************************************************
+ * @brief execute ble reset
+ * @note  user should check if other user data need to reset after ble reset.
+ *
+ *****************************************************************************************
+ */
+void ns_ble_reset(void)
+{
+    /// Initialize Task state
+    ke_state_set(TASK_APP, APP_INIT);
+    app_env.adv_actv_idx = GAP_INVALID_ACTV_IDX;
+    app_env.scan_actv_idx = GAP_INVALID_ACTV_IDX;
+    app_env.init_actv_idx = GAP_INVALID_ACTV_IDX;
+    app_env.conidx = GAP_INVALID_CONIDX;
+    app_env.adv_mode = APP_ADV_MODE_ENABLE;
+    app_env.adv_state = APP_ADV_STATE_IDLE;
+
+    for(uint8_t i = 0; i < APP_CON_IDX_MAX; i++)
+        app_env.conn_env[i].conidx = GAP_INVALID_CONIDX;
+
+    app_env.next_svc = 0;
+    ble_prf_evn.prf_num = 0;
+    prf_init(RWIP_RST);
+    /// Reset ble stack
+    rwip_reset();
+    app_send_gapm_reset_cmd();
+}
+
+
+#define FLASH_PAGE_SIZE        256
+/**
+ *****************************************************************************************
+ * @brief flash write interface using the rom api for data size more than page
+ * @note  just for  ble project
+ *
+ *****************************************************************************************
+ */
+ReturnMsg CMD_FLASH_WRITE(uint32_t addr, uint8_t* p_data, uint32_t len)
+{
+    ReturnMsg error = FlashOperationSuccess;
+    uint8_t num_of_page = 0, num_of_single = 0, address = 0, count = 0, temp = 0;
+    address = addr % FLASH_PAGE_SIZE;
+    count = FLASH_PAGE_SIZE - address;
+    num_of_page =  len / FLASH_PAGE_SIZE;
+    num_of_single = len % FLASH_PAGE_SIZE;
+
+    if(address == 0)
+    {
+        if(num_of_page == 0)
+        {
+            error = ATOMIC_QPP(addr, p_data, len);
+
+            if(error != FlashOperationSuccess)goto END;
+        }
+        else
+        {
+            while(num_of_page--)
+            {
+                error = ATOMIC_QPP(addr, p_data, FLASH_PAGE_SIZE);
+
+                if(error != FlashOperationSuccess)goto END;
+
+                addr +=  FLASH_PAGE_SIZE;
+                p_data += FLASH_PAGE_SIZE;
+            }
+
+            error = ATOMIC_QPP(addr, p_data, num_of_single);
+
+            if(error != FlashOperationSuccess)goto END;
+        }
+    }
+    else
+    {
+        if(num_of_page == 0)
+        {
+            if(num_of_single > count)
+            {
+                temp = num_of_single - count;
+                error = ATOMIC_QPP(addr, p_data, count);
+
+                if(error != FlashOperationSuccess)goto END;
+
+                addr +=  count;
+                p_data += count;
+                error = ATOMIC_QPP(addr, p_data, temp);
+
+                if(error != FlashOperationSuccess)goto END;
+            }
+            else
+            {
+                error = ATOMIC_QPP(addr, p_data, len);
+
+                if(error != FlashOperationSuccess)goto END;
+            }
+        }
+        else
+        {
+            len -= count;
+            num_of_page =  len / FLASH_PAGE_SIZE;
+            num_of_single = len % FLASH_PAGE_SIZE;
+            error = ATOMIC_QPP(addr, p_data, count);
+
+            if(error != FlashOperationSuccess)goto END;
+
+            addr +=  count;
+            p_data += count;
+
+            while(num_of_page--)
+            {
+                error = ATOMIC_QPP(addr, p_data, FLASH_PAGE_SIZE);
+
+                if(error != FlashOperationSuccess)goto END;
+
+                addr +=  FLASH_PAGE_SIZE;
+                p_data += FLASH_PAGE_SIZE;
+            }
+
+            if(num_of_single != 0)
+            {
+                error = ATOMIC_QPP(addr, p_data, num_of_single);
+
+                if(error != FlashOperationSuccess)goto END;
+            }
+        }
+    }
+
+END:
+    return error;
+}
+#endif //(BLE_APP_PRESENT)
+
+/// @} APP

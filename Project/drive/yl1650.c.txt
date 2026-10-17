@@ -1,0 +1,553 @@
+/***********************************************************************
+ * @file    yl1650.c
+ * @brief   YL1650 4位数码管驱动 (兼容 TM1650 二线协议)
+ * @details 不使用 NOP 微秒延时，也不使用阻塞式毫秒延时。
+ *          所有读写都被拆成状态机步骤，由一个 1ms 周期的引擎任务
+ *          逐步推进，每个时序状态持续 1ms（毫秒级时序）。
+ *          应用层请求先进 FIFO 队列排队，引擎按顺序执行：
+ *            YL1650_EngineTask - 1ms 周期，驱动收发状态机
+ *            YL1650_WriteTask  - 400ms 周期，准备电压/电量显示数据
+ *            YL1650_ReadTask   - 100ms 周期，排队读按键
+ ***********************************************************************/
+#include "n32wb033.h"
+#include "n32wb033_gpio.h"
+#include "n32wb033_rcc.h"
+#include <stdint.h>
+#include "type.h"
+#include "Mytask.h"
+#include "proto.h"
+#include "my_ble.h"
+#include "yl1650.h"
+#include "core.h"
+#include "flash.h"
+
+/* ================== 1. 硬件引脚与宏定义 ================== */
+#define YL1650_PORT         GPIOB
+#define YL1650_DIO_PIN      GPIO_PIN_4
+#define YL1650_CLK_PIN      GPIO_PIN_5
+
+#define CLK_HIGH()          GPIO_SetBits(YL1650_PORT, YL1650_CLK_PIN)
+#define CLK_LOW()           GPIO_ResetBits(YL1650_PORT, YL1650_CLK_PIN)
+#define DIO_HIGH()          GPIO_SetBits(YL1650_PORT, YL1650_DIO_PIN)
+#define DIO_LOW()           GPIO_ResetBits(YL1650_PORT, YL1650_DIO_PIN)
+#define DIO_READ()          GPIO_ReadInputDataBit(YL1650_PORT, YL1650_DIO_PIN)
+
+/* ================== 2. 显存与段码表 ================== */
+/* 全局显存缓存：4个数码位，bit7为小数点/图标标志 */
+static Byte g_seg_buf[4]  = {0x00, 0x00, 0x00, 0x00};
+static Byte g_seg_addr[4] = {0x68, 0x6a, 0x6c, 0x6e};
+
+#define YL1650_1_SEG_TABLE_INX 10
+/* 共阴极 0-9 段码表 (bit0~bit6 对应 A~G，bit7 对应 DP) */
+static const Byte YL1650_SegTable[11] =
+{
+    0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F, 0x30
+};
+
+/* ================== 3. 请求队列 ================== */
+#define YL_Q_SIZE 16u   /* 必须为2的倍数即可，环形队列容量 */
+
+typedef struct
+{
+    Byte cmd;       /* 第一字节：寄存器地址/命令 (0x68~0x6E, 0x48, 0x49) */
+    Byte data;      /* 写数据；读操作不使用 */
+    Byte is_read;   /* 1=读操作，0=写操作 */
+} yl_req_t;
+
+static yl_req_t s_q[YL_Q_SIZE];
+static volatile Byte s_q_head = 0u;   /* 出队位置 */
+static volatile Byte s_q_tail = 0u;   /* 入队位置 */
+
+/* 请求入队，返回1成功，0队列满 */
+static Byte YL_QueuePush(Byte cmd, Byte data, Byte is_read)
+{
+    Byte next = (Byte)((s_q_tail + 1u) % YL_Q_SIZE);
+
+    if (next == s_q_head) return 0u;       /* 队列满 */
+
+    s_q[s_q_tail].cmd     = cmd;
+    s_q[s_q_tail].data    = data;
+    s_q[s_q_tail].is_read = is_read;
+    s_q_tail = next;
+    return 1u;
+}
+
+/* 请求出队，返回1成功，0队列空 */
+static Byte YL_QueuePop(yl_req_t *out)
+{
+    if (s_q_head == s_q_tail) return 0u;   /* 队列空 */
+
+    *out = s_q[s_q_head];
+    s_q_head = (Byte)((s_q_head + 1u) % YL_Q_SIZE);
+    return 1u;
+}
+
+/* ================== 4. 引脚初始化 ================== */
+/**
+ * @brief 初始化 YL1650 通信引脚 (CLK推挽，DIO开漏便于读ACK/按键)
+ */
+void YL1650_IO_Init(void)
+{
+    GPIO_InitType InitStruct;
+    RCC_EnableAPB2PeriphClk(RCC_APB2_PERIPH_GPIOB, ENABLE);
+    /* 初始电平置高，保证初始化瞬间总线空闲防误触发 */
+    GPIO_SetBits(YL1650_PORT, YL1650_CLK_PIN | YL1650_DIO_PIN);
+    GPIO_InitStruct(&InitStruct);
+    /* CLK(PB4) 推挽输出 */
+    InitStruct.Pin       = YL1650_CLK_PIN;
+    InitStruct.GPIO_Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitPeripheral(YL1650_PORT, &InitStruct);
+    /* DIO(PB5) 开漏输出，支持双向读取(需外接上拉) */
+    InitStruct.Pin       = YL1650_DIO_PIN;
+    InitStruct.GPIO_Mode = GPIO_MODE_OUTPUT_OD;
+    GPIO_InitPeripheral(YL1650_PORT, &InitStruct);
+}
+
+/* ================== 5. 1ms 引擎状态机 ================== */
+/*
+ * 一次完整传输的状态流（每个状态持续1ms）:
+ *   START(3) -> 命令字节8位x2 + ACK(3) ->
+ *   写数据8位x2 或 读8位x2 + ACK(3) -> STOP(3)
+ * 共44ms，全程非阻塞。
+ */
+typedef enum
+{
+    YL_S_IDLE = 0,
+    YL_S_START1,      /* CLK=1,DIO=1 */
+    YL_S_START2,      /* DIO=0 */
+    YL_S_START3,      /* CLK=0 */
+    YL_S_CMD_LOW,     /* 命令位：CLK=0，按位设置DIO */
+    YL_S_CMD_HIGH,    /* CLK=1 */
+    YL_S_CACK1,       /* 命令ACK：CLK=0,DIO=1(释放) */
+    YL_S_CACK2,       /* CLK=1 */
+    YL_S_CACK3,       /* CLK=0 */
+    YL_S_WR_LOW,      /* 写数据位：CLK=0，按位设置DIO */
+    YL_S_WR_HIGH,     /* CLK=1 */
+    YL_S_RD_LOW,      /* 读位：CLK=0，释放DIO，从机放数据 */
+    YL_S_RD_HIGH,     /* CLK=1，读DIO */
+    YL_S_DACK1,       /* 数据ACK：CLK=0,DIO=1 */
+    YL_S_DACK2,       /* CLK=1 */
+    YL_S_DACK3,       /* CLK=0 */
+    YL_S_STOP1,       /* DIO=0 */
+    YL_S_STOP2,       /* CLK=1 */
+    YL_S_STOP3        /* DIO=1，传输完成 */
+} yl_engine_state_t;
+
+static Byte s_key_value = 0u;
+
+/**
+ * @brief 引擎任务：以GTIM1真实毫秒为节拍，每次只推进状态机一个步骤
+ * @note  调度器存在"补拍"行为（主循环繁忙后会在同一真实毫秒内连续调用），
+ *        用真实毫秒计数过滤补拍，保证每个状态至少持续1ms。
+ *        若主循环繁忙导致中间空了若干毫秒，直接继续推进即可——
+ *        手册时序参数只有最小值没有最大值，CLK暂停对从机无害，
+ *        绝不能中途放弃帧，否则多余的CLK沿会打乱从机位计数。
+ */
+static void YL1650_EngineTask(void)
+{
+    static yl_engine_state_t st = YL_S_IDLE;
+    static yl_req_t  curr;
+    static Byte   bit_idx;
+    static Byte   shift;
+    static Byte   read_val;
+    static UInt32  last_ms;
+    static Byte   pace_ready = 0u;
+    static Byte   healthy_beats = 0u;
+    UInt32 now;
+    UInt32 elapsed;
+    now = TaskGetTick();
+
+    if (pace_ready == 0u)                 /* 首次注册：只建立时间基准 */
+    {
+        last_ms = now;
+        pace_ready = 1u;
+        return;
+    }
+
+    elapsed = now - last_ms;
+    last_ms = now;
+
+    if (elapsed == 0u) return;            /* 同一真实毫秒内的补拍：忽略 */
+
+    /* elapsed>=1（含中间空过若干毫秒）：一律继续，帧必须完整发出 */
+
+    /* 每个真实毫秒最多推进一个步骤 */
+    if (st == YL_S_IDLE)
+    {
+        if (healthy_beats < 2u)           /* 上电先确认连续2个健康节拍，避开启动繁忙期 */
+        {
+            healthy_beats++;
+            return;
+        }
+
+        if (YL_QueuePop(&curr) == 0u) return;   /* 无请求 */
+
+        bit_idx = 0u;
+        shift   = curr.cmd;
+        st = YL_S_START1;
+        return;
+    }
+
+    switch (st)
+    {
+        case YL_S_START1:                    /* 起始：总线先空闲 */
+            CLK_HIGH();
+            DIO_HIGH();
+            st = YL_S_START2;
+            break;
+
+        case YL_S_START2:                    /* SCL高时 SDA 下降沿 */
+            DIO_LOW();
+            st = YL_S_START3;
+            break;
+
+        case YL_S_START3:
+            CLK_LOW();
+            st = YL_S_CMD_LOW;
+            break;
+
+        case YL_S_CMD_LOW:                   /* 发送命令字节，MSB在前 */
+            CLK_LOW();
+
+            if (shift & 0x80u) DIO_HIGH();
+            else               DIO_LOW();
+
+            shift = (Byte)(shift << 1);
+            st = YL_S_CMD_HIGH;
+            break;
+
+        case YL_S_CMD_HIGH:
+            CLK_HIGH();
+            bit_idx++;
+            st = (bit_idx < 8u) ? YL_S_CMD_LOW : YL_S_CACK1;
+            break;
+
+        case YL_S_CACK1:                     /* 命令字节后的ACK脉冲 */
+            CLK_LOW();
+            DIO_HIGH();
+            st = YL_S_CACK2;
+            break;
+
+        case YL_S_CACK2:
+            CLK_HIGH();
+            st = YL_S_CACK3;
+            break;
+
+        case YL_S_CACK3:
+            CLK_LOW();
+            bit_idx = 0u;
+
+            if (curr.is_read)
+            {
+                read_val = 0u;
+                st = YL_S_RD_LOW;
+            }
+            else
+            {
+                shift = curr.data;
+                st = YL_S_WR_LOW;
+            }
+
+            break;
+
+        case YL_S_WR_LOW:                    /* 写数据字节，MSB在前 */
+            CLK_LOW();
+
+            if (shift & 0x80u) DIO_HIGH();
+            else               DIO_LOW();
+
+            shift = (Byte)(shift << 1);
+            st = YL_S_WR_HIGH;
+            break;
+
+        case YL_S_WR_HIGH:
+            CLK_HIGH();
+            bit_idx++;
+            st = (bit_idx < 8u) ? YL_S_WR_LOW : YL_S_DACK1;
+            break;
+
+        case YL_S_RD_LOW:                    /* 读：SCL低期间从机把数据放上总线 */
+            CLK_LOW();
+            DIO_HIGH();                     /* 释放DIO */
+            st = YL_S_RD_HIGH;
+            break;
+
+        case YL_S_RD_HIGH:                   /* SCL高电平期间采样 */
+            CLK_HIGH();
+            read_val = (Byte)(read_val << 1);
+
+            if (DIO_READ()) read_val |= 0x01u;
+
+            bit_idx++;
+            st = (bit_idx < 8u) ? YL_S_RD_LOW : YL_S_DACK1;
+            break;
+
+        case YL_S_DACK1:                     /* 数据阶段后的ACK脉冲 */
+            CLK_LOW();
+            DIO_HIGH();
+            st = YL_S_DACK2;
+            break;
+
+        case YL_S_DACK2:
+            CLK_HIGH();
+            st = YL_S_DACK3;
+            break;
+
+        case YL_S_DACK3:
+            CLK_LOW();
+            st = YL_S_STOP1;
+            break;
+
+        case YL_S_STOP1:
+            DIO_LOW();
+            st = YL_S_STOP2;
+            break;
+
+        case YL_S_STOP2:                     /* SCL高时 SDA 上升沿 = 停止 */
+            CLK_HIGH();
+            st = YL_S_STOP3;
+            break;
+
+        case YL_S_STOP3:
+            DIO_HIGH();
+
+            if (curr.is_read) s_key_value = read_val;   /* 读结果缓存 */
+
+            st = YL_S_IDLE;
+            break;
+
+        default:
+            DIO_HIGH();
+            CLK_HIGH();
+            st = YL_S_IDLE;
+            break;
+    }
+}
+
+Byte YL1650_DisplayModeGet(void)
+{
+    if (My_Ble_ProjectNoGet() == 0x0410u)
+        return 0u;
+
+    return Flash_DisplayModeLoad();
+}
+
+Int16 YL1650_DisplayModeSet(Byte mode)
+{
+    if ((mode != YL1650_DISPLAY_MODE_SOC) &&
+        (mode != YL1650_DISPLAY_MODE_VOLTAGE))
+        return CHAR_DEV_ERR_PARAM;
+    if (My_Ble_ProjectNoGet() == 0x0410u)
+        return CHAR_DEV_ERR_STATE;
+    if (My_Ble_BackgroundBusy() != 0u)
+        return CHAR_DEV_ERR_BUSY;
+
+    return Flash_DisplayModeSave(mode);
+}
+
+/* ================== 6. 应用层接口（仅入队，不阻塞） ================== */
+void YL1650_WriteReg(Byte addr, Byte data)
+{
+    (void)YL_QueuePush(addr, data, 0u);
+}
+
+Byte YL1650_ReadKey(void)
+{
+    /* 排队一次读操作，新值稍后由引擎更新；本次返回缓存值 */
+    (void)YL_QueuePush(YL1650_CMD_READ_KEY, 0u, 1u);
+    return s_key_value;
+}
+
+Byte yl1650_cmd = 0;
+void YL1650_SetBrightness(Byte brightness)
+{
+    if (brightness > 7u) brightness = 7u;
+
+    yl1650_cmd = (Byte)((brightness << 4) | 0x01u);  /* bit0=显示开，bit4~6=亮度 */
+    YL1650_WriteReg(C_WR_command, yl1650_cmd);
+}
+
+/**
+ * @brief 按 XX.X 格式刷新3位数字显示
+ * @param val 0~999，显示为百位/个位.十分位
+ * @param show_dp 个位小数点(bit7)是否点亮
+ */
+void YL1650_UpdateDisplay(UInt16 val, Byte show_dp)
+{
+    Byte hundreds;
+    Byte units;
+    Byte tenths;
+
+    if (val > 999u) val = 999u;
+
+    hundreds = (Byte)(val / 100u);
+    units    = (Byte)((val / 10u) % 10u);
+    tenths   = (Byte)(val % 10u);
+
+    /* DIG1 百位：消隐前导零，保留bit7标志 */
+    if (hundreds == 0u) g_seg_buf[0] = 0;
+    else                g_seg_buf[0] = YL1650_SegTable[hundreds];
+
+    g_seg_buf[1] = 0;
+
+    /* DIG2 个位：由 show_dp 控制小数点 */
+    if(units != 0u || hundreds != 0u)
+    {
+        if (show_dp) g_seg_buf[1] = (Byte)(0x80u | YL1650_SegTable[units]);
+        else         g_seg_buf[1] = YL1650_SegTable[units];
+    }
+
+    /* DIG3 十分位：始终显示，保留bit7标志 */
+    if(units == 0u && hundreds == 0u && tenths == 1) tenths = YL1650_1_SEG_TABLE_INX;
+
+    g_seg_buf[2] = (g_seg_buf[2] & 0x80) | YL1650_SegTable[tenths];
+}
+
+void YL1650_SetBatteryLevel(Byte percentage)
+{
+    Byte bat_val = 0x00;
+
+    if (percentage == 0u)       bat_val = 0x00;   /* 仅亮外框 */
+    else if (percentage <= 20u) bat_val = 0x10;
+    else if (percentage <= 40u) bat_val = 0x18;
+    else if (percentage <= 60u) bat_val = 0x1C;
+    else if (percentage <= 80u) bat_val = 0x1E;
+    else                        bat_val = 0x1F;
+
+    /* 保留高3位(蓝牙、V、%等图标状态) */
+    g_seg_buf[3] = (g_seg_buf[3] & 0xE0) | bat_val;
+}
+
+void YL1650_SetIcon(Byte mask, Byte state)
+{
+    if(mask & YL1650_ICON_BLE)
+    {
+        if(state)
+            g_seg_buf[3] |= (0x01 << 5);
+        else
+            g_seg_buf[3] &= ~(0x01 << 5);
+    }
+
+    if(mask & YL1650_ICON_PERCENT)
+    {
+        if(state)
+            g_seg_buf[3] |= (0x01 << 6);
+        else
+            g_seg_buf[3] &= ~(0x01 << 6);
+    }
+
+    if(mask & YL1650_ICON_V)
+    {
+        if(state)
+            g_seg_buf[3] |= (0x01 << 7);
+        else
+            g_seg_buf[3] &= ~(0x01 << 7);
+    }
+}
+
+/* ================== 7. 定时任务 ================== */
+#define YL1650_WR_PERIOD_MS     800u    /* 写显示任务周期 */
+#define YL1650_RD_PERIOD_MS     800u    /* 读按键任务周期 */
+
+void wirteYL1650seg(void)
+{
+    for(Byte i = 0; i < 4; i++)
+        YL1650_WriteReg(g_seg_addr[i], g_seg_buf[i]);
+}
+
+Byte IconBuf[3] = {YL1650_ICON_PERCENT, YL1650_ICON_V, YL1650_ICON_BLE};
+
+static void YL1650_WriteTask(void)
+{
+    Byte show_voltage;
+    static Byte ready = 0;
+    static Byte ble_linked = 1;
+    const com_0x11_type *b = Proto_GetBatteryStatus();
+    int16_t soc;
+	
+    if (My_Ble_BackgroundBusy() != 0u)
+        return;
+
+    show_voltage = (Byte)(YL1650_DisplayModeGet() == YL1650_DISPLAY_MODE_VOLTAGE);
+
+    ready      = Proto_IsBatteryStatusReady();
+    ble_linked = My_Ble_BmsReady();
+
+    if ((ready == 0u) || (b == 0))
+    {
+        /* BMS数据无效：显示 00.0，图标全灭，电池格空 */
+        YL1650_UpdateDisplay(0, 1);
+        YL1650_SetIcon(YL1650_ICON_PERCENT | YL1650_ICON_V | YL1650_ICON_BLE, 0);
+        YL1650_SetBatteryLevel(1);
+        wirteYL1650seg();
+        return;
+    }
+
+    soc = b->vbat.Soc;
+    if (soc < 0) soc = 0;
+    if (soc > 100) soc = 100;
+	
+    if (show_voltage)
+    {
+        /* 电压画面：pack_voltage_mv/100，如 51230mV -> 51.2V */
+        UInt16 v = (UInt16)(b->vbat.Voltage / 100u);
+        YL1650_UpdateDisplay(v, 1);
+        YL1650_SetIcon(YL1650_ICON_PERCENT, 0);
+        YL1650_SetIcon(YL1650_ICON_V, 1);
+    }
+    else
+    {
+        /* 电量画面：如 SOC=85 -> 85.0%；SOC=100 -> 100% */
+        if (soc >= 100) YL1650_UpdateDisplay(100, 0);
+        else            YL1650_UpdateDisplay((UInt16)soc, 0);
+
+        YL1650_SetIcon(YL1650_ICON_V, 0);
+        YL1650_SetIcon(YL1650_ICON_PERCENT, 1);
+    }
+
+    YL1650_SetIcon(YL1650_ICON_BLE, ble_linked);
+    YL1650_SetBatteryLevel((Byte)soc);
+    wirteYL1650seg();
+}
+
+/**
+ * @brief 读按键任务：周期排队读请求，结果用 YL1650_GetKey 查询
+ */
+static void YL1650_ReadTask(void)
+{
+    if (My_Ble_BackgroundBusy() != 0u)
+        return;
+
+    (void)YL_QueuePush(YL1650_CMD_READ_KEY, 0u, 1u);
+}
+
+Byte YL1650_GetKey(void)
+{
+    return s_key_value;
+}
+
+/**
+ * @brief 上电启动流程：引脚初始化 + 写RAM + 开显示，全部以请求排队。
+ *        FIFO顺序天然保证"先写完RAM再开显示"，全程不阻塞。
+ */
+void YL1650_StartUp(void)
+{
+    YL1650_IO_Init();
+    YL1650_UpdateDisplay(1, 1);     /* 初始 00.0，3个写请求 */
+    YL1650_SetBatteryLevel(1);      /* 电池格初始全灭(仅亮外框) */
+	wirteYL1650seg();
+    YL1650_SetBrightness(7);        /* 排最后：前面RAM都写完后才开显示 */
+}
+
+void YL1650_Init(void)
+{
+    if(YB_N32W_BLE_002_HOST == 65 && YB_N32W_BLE_002_SLAVE == 2)
+	{
+
+    /* 先注册引擎，再排队启动请求 */
+    TaskAdd(TASK_CYCKE_1mS, YL1650_EngineTask);
+    YL1650_StartUp();
+    TaskAdd(YL1650_WR_PERIOD_MS, YL1650_WriteTask);
+    TaskAdd(YL1650_RD_PERIOD_MS, YL1650_ReadTask);
+	}
+}

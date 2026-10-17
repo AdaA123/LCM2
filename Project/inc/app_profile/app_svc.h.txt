@@ -1,0 +1,62 @@
+#ifndef APP_SVC_H_
+#define APP_SVC_H_
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ================================================================== */
+/*  128-bit UUID (标准蓝牙 Base UUID 小端序)                          */
+/* ================================================================== */
+/* 00005453-0000-1000-8000-00805F9B34FB */
+#define APP_SVC_5453_UUID_128       {0xFB,0x34,0x9B,0x5F,0x80,0x00,0x00,0x80, 0x00,0x10, 0x00,0x00, 0x53,0x54,0x00,0x00}
+/* 00005401-0000-1000-8000-00805F9B34FB 控制点 */
+#define APP_SVC_5401_UUID_128       {0xFB,0x34,0x9B,0x5F,0x80,0x00,0x00,0x80, 0x00,0x10, 0x00,0x00, 0x01,0x54,0x00,0x00}
+/* 00005400-0000-1000-8000-00805F9B34FB 命令完成 */
+#define APP_SVC_5400_UUID_128       {0xFB,0x34,0x9B,0x5F,0x80,0x00,0x00,0x80, 0x00,0x10, 0x00,0x00, 0x00,0x54,0x00,0x00}
+
+/* ================================================================== */
+/*  Device Information 字符串 (占位, 按需修改)                         */
+/* ================================================================== */
+#define APP_SVC_MODEL_STR           "GW033"
+#define APP_SVC_MFR_STR             "NSING"
+#define APP_SVC_SWREV_STR           "AV01"
+
+/* 命令完成回报包首字节 (0x21), 与旧 ...0004 语义一致 */
+#define APP_SVC_CMD_CMP_TAG         0x21u
+
+/* ================================================================== */
+/*  对外接口                                                           */
+/* ================================================================== */
+
+/**
+ * @brief  向协议栈注册 180A+5453 服务 (由当前 BLE Port 平台实现注册,
+ *         在 RDTSS(FF00) 之后注册, 句柄自动顺延为 7-19)
+ */
+void app_svc_add(void);
+
+/**
+ * @brief  命令完成 Indicate (5400): 封装 [0x21, cmd, status, len, payload...]
+ * @param  conidx 目标手机连接号
+ * @param  cmd    原始控制命令码 (回显)
+ * @param  status 执行结果码
+ * @param  data   附加载荷 (可为 NULL)
+ * @param  length 附加载荷长度
+ * @return true=已发出/在途, false=未订阅 CCCD 或忙
+ */
+bool app_svc_cmd_cmp_ind(uint8_t conidx, uint8_t cmd, uint8_t status,
+                         const uint8_t *data, uint16_t length);
+
+/**
+ * @brief  链路丢失: 复位 5400 CCCD 订阅与在途 Indicate (my_ble 断链时调用)
+ */
+void app_svc_on_link_lost(uint8_t conidx);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* APP_SVC_H_ */

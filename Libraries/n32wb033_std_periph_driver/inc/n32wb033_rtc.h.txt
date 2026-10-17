@@ -1,0 +1,345 @@
+/**
+*     Copyright (c) 2026, Nsing Technologies Inc.
+*
+*     All rights reserved.
+*
+*     This software is the exclusive property of Nsing Technologies Inc. (Hereinafter
+* referred to as Nsing). This software, and the product of Nsing described herein
+* (Hereinafter referred to as the Product) are owned by Nsing under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     Nsing does not grant any license under its patents, copyrights, trademarks, or other
+* intellectual property rights. Names and brands of third party may be mentioned or referred
+* thereto (if any) for identification purposes only.
+*
+*     Nsing reserves the right to make changes, corrections, enhancements, modifications, and
+* improvements to this software at any time without notice. Please contact Nsing and obtain
+* the latest version of this software before placing orders.
+
+*     Although Nsing has attempted to provide accurate and reliable information, Nsing assumes
+* no responsibility for the accuracy and reliability of this software.
+*
+*     It is the responsibility of the user of this software to properly design, program, and test
+* the functionality and safety of any application made of this information and any resulting product.
+* In no event shall Nsing be liable for any direct, indirect, incidental, special,exemplary, or
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     Nsing Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify Nsing and hold Nsing
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by Nsing, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     Nsing products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations.
+* User shall comply with any applicable export control laws and regulations promulgated and administered by
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+/**
+*\*\file n32wb033_rtc.h
+*\*\author Nsing
+*\*\version v1.0.0
+*\*\copyright Copyright (c) 2026, Nsing Technologies Inc. All rights reserved.
+**/
+
+#ifndef __N32WB033_RTC_H__
+#define __N32WB033_RTC_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "n32wb033.h"
+
+/** RTC Init structure definition **/
+typedef struct
+{
+    uint32_t RTC_HourFormat;    /* Specifies the RTC Hour Format. */
+
+    uint32_t RTC_AsynchPrediv;  /* Specifies the RTC Asynchronous Predivider value */
+
+    uint32_t RTC_SynchPrediv;   /* Specifies the RTC Synchronous Predivider value */
+} RTC_InitType;
+
+
+/** RTC Time structure definition **/
+typedef struct
+{
+    uint8_t Hours;      /* Specifies the RTC Time Hour */
+
+    uint8_t Minutes;    /* Specifies the RTC Time Minutes */
+
+    uint8_t Seconds;    /* Specifies the RTC Time Seconds */
+
+    uint8_t H12;        /* Specifies the RTC AM/PM Time */
+} RTC_TimeType;
+
+/** RTC Date structure definition **/
+typedef struct
+{
+    uint8_t WeekDay;    /* Specifies the RTC Date WeekDay */
+
+    uint8_t Month;      /* Specifies the RTC Date Month (in BCD format) */
+
+    uint8_t Date;       /* Specifies the RTC Date */
+
+    uint8_t Year;       /* Specifies the RTC Date Year */
+} RTC_DateType;
+
+/** RTC Alarm structure definition **/
+typedef struct
+{
+    RTC_TimeType AlarmTime; /* Specifies the RTC Alarm Time members. */
+
+    uint32_t AlarmMask;     /* Specifies the RTC Alarm Masks */
+
+    uint32_t DateWeekMode;  /* Specifies the RTC Alarm is on Date or WeekDay */
+
+    uint8_t DateWeekValue;  /* Specifies the RTC Alarm Date/WeekDay */
+} RTC_AlarmType;
+
+
+#define RTC_REG_BIT_MASK                        ((uint32_t)0x00000000U)
+
+/** RTC_Hour_Formats **/
+#define RTC_24HOUR_FORMAT                        (RTC_REG_BIT_MASK)
+#define RTC_12HOUR_FORMAT                        (RTC_CTRL_HFMT)
+
+/** Masks Definition **/
+#define RTC_TR_RESERVED_MASK                     ((uint32_t)0x007F7F7FU)
+#define RTC_DATE_RESERVED_MASK                   ((uint32_t)0x00FFFF3FU)
+
+#define RTC_RSF_MASK                             ((uint32_t)0xFFFFFFDFU)
+#define RTC_FLAGS_MASK                           ((uint32_t)(RTC_FLAG_RECPF | RTC_FLAG_WTF | RTC_FLAG_ALBF | RTC_FLAG_ALAF | RTC_FLAG_INITF        \
+                                                 | RTC_FLAG_RSYF | RTC_FLAG_INITSF | RTC_FLAG_SHOPF | RTC_FLAG_WTWF | RTC_FLAG_ALBWF | RTC_FLAG_ALAWF))
+
+/** RTC_TIMEOUT_Definitions**/
+#define INITMODE_TIMEOUT                         ((uint32_t)0x00002000U)
+#define SYNCHRO_TIMEOUT                          ((uint32_t)0x00008000U)
+#define RECALPF_TIMEOUT                          ((uint32_t)0x00001000U)
+#define SHPF_TIMEOUT                             ((uint32_t)0x00002000U)
+#define INITSUBS_TIMEOUT                         ((uint32_t)0x00100000U)
+
+/** RTC_AM_PM_Definitions **/
+#define RTC_AM_H12                               ((uint8_t)0x00U)
+#define RTC_PM_H12                               (RTC_CTRL_HFMT)
+
+/** Coded in BCD format **/
+#define RTC_MONTH_JANUARY                        ((uint8_t)0x01U)
+#define RTC_MONTH_FEBRURY                        ((uint8_t)0x02U)
+#define RTC_MONTH_MARCH                          ((uint8_t)0x03U)
+#define RTC_MONTH_APRIL                          ((uint8_t)0x04U)
+#define RTC_MONTH_MAY                            ((uint8_t)0x05U)
+#define RTC_MONTH_JUNE                           ((uint8_t)0x06U)
+#define RTC_MONTH_JULY                           ((uint8_t)0x07U)
+#define RTC_MONTH_AUGUST                         ((uint8_t)0x08U)
+#define RTC_MONTH_SEPTEMBER                      ((uint8_t)0x09U)
+#define RTC_MONTH_OCTOBER                        ((uint8_t)0x10U)
+#define RTC_MONTH_NOVEMBER                       ((uint8_t)0x11U)
+#define RTC_MONTH_DECEMBER                       ((uint8_t)0x12U)
+
+/** RTC_WeekDay_Definitions **/
+#define RTC_WEEKDAY_MONDAY                       ((uint8_t)0x01U)
+#define RTC_WEEKDAY_TUESDAY                      ((uint8_t)0x02U)
+#define RTC_WEEKDAY_WEDNESDAY                    ((uint8_t)0x03U)
+#define RTC_WEEKDAY_THURSDAY                     ((uint8_t)0x04U)
+#define RTC_WEEKDAY_FRIDAY                       ((uint8_t)0x05U)
+#define RTC_WEEKDAY_SATURDAY                     ((uint8_t)0x06U)
+#define RTC_WEEKDAY_SUNDAY                       ((uint8_t)0x07U)
+
+/** RTC_AlarmDateWeekDay_Definitions **/
+#define RTC_ALARM_SEL_WEEKDAY_DATE               (RTC_REG_BIT_MASK)
+#define RTC_ALARM_SEL_WEEKDAY_WEEKDAY            (RTC_ALARMA_WKDSEL)
+
+/** RTC_AlarmMask_Definitions **/
+#define RTC_ALARMMASK_NONE                       (RTC_REG_BIT_MASK)
+#define RTC_ALARMMASK_WEEKDAY                    (RTC_ALARMA_MASK4)
+#define RTC_ALARMMASK_HOURS                      (RTC_ALARMA_MASK3)
+#define RTC_ALARMMASK_MINUTES                    (RTC_ALARMA_MASK2)
+#define RTC_ALARMMASK_SECONDS                    (RTC_ALARMA_MASK1)
+#define RTC_ALARMMASK_ALL                        (RTC_ALARMA_MASK4 | RTC_ALARMA_MASK3 | RTC_ALARMA_MASK2 | RTC_ALARMA_MASK1)
+
+/** RTC_Alarms_Definitions **/
+#define RTC_A_ALARM                              (RTC_CTRL_ALAEN)
+#define RTC_B_ALARM                              (RTC_CTRL_ALBEN)
+
+/** RTC_Bypass_Definitions **/
+#define RTC_BYPASS_UPDATE                        (RTC_CTRL_BYPS)
+
+/** RTC_Alarm_Sub_Seconds_Masks_Definitions **/
+#define RTC_SUBS_MASK_ALL       (RTC_REG_BIT_MASK)                                                                               /* All Alarm SS fields are masked There is no comparison on sub seconds for Alarm */
+#define RTC_SUBS_MASK_SS14_1    (RTC_ALRMASS_MASKSSB_0)                                                                          /* SS[14:1] are don't care in Alarm comparison. Only SS[0] is compared */
+#define RTC_SUBS_MASK_SS14_2    (RTC_ALRMASS_MASKSSB_1)                                                                          /* SS[14:2] are don't care in Alarm comparison. Only SS[1:0] are compared */
+#define RTC_SUBS_MASK_SS14_3    (RTC_ALRMASS_MASKSSB_0 | RTC_ALRMASS_MASKSSB_1)                                                  /* SS[14:3] are don't care in Alarm comparison. Only SS[2:0] are compared */
+#define RTC_SUBS_MASK_SS14_4    (RTC_ALRMASS_MASKSSB_2)                                                                          /* SS[14:4] are don't care in Alarm comparison. Only SS[3:0] are compared */
+#define RTC_SUBS_MASK_SS14_5    (RTC_ALRMASS_MASKSSB_2 | RTC_ALRMASS_MASKSSB_0)                                                  /* SS[14:5] are don't care in Alarm comparison. Only SS[4:0] are compared */
+#define RTC_SUBS_MASK_SS14_6    (RTC_ALRMASS_MASKSSB_2 | RTC_ALRMASS_MASKSSB_1)                                                  /* SS[14:6] are don't care in Alarm comparison. Only SS[5:0] are compared */
+#define RTC_SUBS_MASK_SS14_7    (RTC_ALRMASS_MASKSSB_2 | RTC_ALRMASS_MASKSSB_1 | RTC_ALRMASS_MASKSSB_0)                          /* SS[14:7] are don't care in Alarm comparison. Only SS[6:0] are compared */
+#define RTC_SUBS_MASK_SS14_8    (RTC_ALRMASS_MASKSSB_3)                                                                          /* SS[14:8] are don't care in Alarm comparison. Only SS[7:0] are compared */
+#define RTC_SUBS_MASK_SS14_9    (RTC_ALRMASS_MASKSSB_3 | RTC_ALRMASS_MASKSSB_0)                                                  /* SS[14:9] are don't care in Alarm comparison. Only SS[8:0] are compared */
+#define RTC_SUBS_MASK_SS14_10   (RTC_ALRMASS_MASKSSB_3 | RTC_ALRMASS_MASKSSB_1)                                                  /* SS[14:10] are don't care in Alarm comparison. Only SS[9:0] are compared */
+#define RTC_SUBS_MASK_SS14_11   (RTC_ALRMASS_MASKSSB_3 | RTC_ALRMASS_MASKSSB_1 | RTC_ALRMASS_MASKSSB_0)                          /* SS[14:11] are don't care in Alarm comparison. Only SS[10:0] are compared */
+#define RTC_SUBS_MASK_SS14_12   (RTC_ALRMASS_MASKSSB_3 | RTC_ALRMASS_MASKSSB_2)                                                  /* SS[14:12] are don't care in Alarm comparison.Only SS[11:0] are compared */
+#define RTC_SUBS_MASK_SS14_13   (RTC_ALRMASS_MASKSSB_3 | RTC_ALRMASS_MASKSSB_2 | RTC_ALRMASS_MASKSSB_0)                          /* SS[14:13] are don't care in Alarm comparison. Only SS[12:0] are compared */
+#define RTC_SUBS_MASK_SS14_14   (RTC_ALRMASS_MASKSSB_3 | RTC_ALRMASS_MASKSSB_2 | RTC_ALRMASS_MASKSSB_1)                          /* SS[14] is don't care in Alarm comparison.Only SS[13:0] are compared */
+#define RTC_SUBS_MASK_NONE      (RTC_ALRMASS_MASKSSB_3 | RTC_ALRMASS_MASKSSB_2 | RTC_ALRMASS_MASKSSB_1 | RTC_ALRMASS_MASKSSB_0)  /* SS[14:0] are compared and must match to activate alarm */
+
+
+typedef enum
+{
+    RTC_WKUPCLK_RTCCLK_DIV16   = (RTC_REG_BIT_MASK),
+    RTC_WKUPCLK_RTCCLK_DIV8    = (RTC_CTRL_WKUPSEL_0),
+    RTC_WKUPCLK_RTCCLK_DIV4    = (RTC_CTRL_WKUPSEL_1),
+    RTC_WKUPCLK_RTCCLK_DIV2    = (RTC_CTRL_WKUPSEL_0 | RTC_CTRL_WKUPSEL_1),
+    RTC_WKUPCLK_CK_SPRE_16BITS = (RTC_CTRL_WKUPSEL_2),
+    RTC_WKUPCLK_CK_SPRE_17BITS = (RTC_CTRL_WKUPSEL_1 | RTC_CTRL_WKUPSEL_2),
+}RTC_WAKE_UP_CLOCK;
+
+
+/** RTC_Reference_Detection_definitions **/
+#define RTC_REFERENCE_DETECT_DISABLE             (RTC_REG_BIT_MASK)
+#define RTC_REFERENCE_DETECT_ENABLE              (RTC_CTRL_REFCLKEN)
+
+/** RTC_Output_selection_Definitions **/
+#define RTC_OUTPUT_DIS                           (RTC_REG_BIT_MASK)
+#define RTC_OUTPUT_ALA                           (RTC_CTRL_OUTSEL_0)
+#define RTC_OUTPUT_ALB                           (RTC_CTRL_OUTSEL_1)
+#define RTC_OUTPUT_WKUP                          (RTC_CTRL_OUTSEL_0 | RTC_CTRL_OUTSEL_1)
+
+/** RTC_Output_Polarity_Definitions **/
+#define RTC_OUTPOL_HIGH                          (RTC_REG_BIT_MASK)
+#define RTC_OUTPOL_LOW                           (RTC_CTRL_OPOL)
+
+/** RTC_Calib_Output_selection_Definitions **/
+#define RTC_CALIB_OUTPUT_256HZ                   (RTC_REG_BIT_MASK)
+#define RTC_CALIB_OUTPUT_1HZ                     (RTC_CTRL_CALOSEL)
+
+/** if RTCCLK = 32768 Hz, Smooth calibation period is 32s,  else 2exp20 RTCCLK seconds **/
+#define SMOOTH_CALIB_32SEC                       (RTC_REG_BIT_MASK)
+
+/** if RTCCLK = 32768 Hz, Smooth calibation period is 16s, else 2exp19 RTCCLK seconds **/
+#define SMOOTH_CALIB_16SEC                       (RTC_CALIB_CW16)
+
+/** if RTCCLK = 32768 Hz, Smooth calibation period is 8s, else 2exp18 RTCCLK seconds **/
+#define SMOOTH_CALIB_8SEC                        (RTC_CALIB_CW8)
+
+/** The number of RTCCLK pulses added during a X -second window = Y - CALM[8:0]  with Y = 512, 256, 128 when X = 32, 16, 8 **/
+#define RTC_SMOOTH_CALIB_PLUS_PULSES_SET         (RTC_CALIB_CP)
+
+/** The number of RTCCLK pulses subbstited during a 32-second window =   CALM[8:0] **/
+#define RTC_SMOOTH_CALIB_PLUS_PULSES_RESET      (RTC_REG_BIT_MASK)
+
+/** RTC_DayLightSaving_Definitions **/
+#define RTC_DAYLIGHT_SAVING_SUB1H                (RTC_CTRL_SU1H)
+#define RTC_DAYLIGHT_SAVING_ADD1H                (RTC_CTRL_AD1H)
+
+#define RTC_STORE_OPERATION_RESET                (RTC_REG_BIT_MASK)
+#define RTC_STORE_OPERATION_SET                  (RTC_CTRL_BAKP)
+
+/** RTC_Output_Type_ALARM_OUT **/
+#define RTC_OUTPUT_OPENDRAIN                     (RTC_REG_BIT_MASK)
+#define RTC_OUTPUT_PUSHPULL                      (RTC_OPT_TYPE)
+
+/** RTC_Add_Fraction_Of_Second_Value **/
+#define RTC_SHIFT_SUB1S_DISABLE                  (RTC_REG_BIT_MASK)
+#define RTC_SHIFT_SUB1S_ENABLE                   (RTC_SCTRL_AD1S)
+
+/** RTC_Input_parameter_format_definitions **/
+#define RTC_FORMAT_BIN                           (RTC_REG_BIT_MASK)     /* BIN format */
+#define RTC_FORMAT_BCD                           (0x00000001U)          /* register format */
+
+/** RTC_Flags_Definitions **/
+#define RTC_INT_FLAG_RESERVED_MASK               ((uint32_t)0x000107FFU)
+
+#define RTC_FLAG_RECPF                           (RTC_INITSTS_RECPF)
+#define RTC_FLAG_WTF                             (RTC_INITSTS_WTF)
+#define RTC_FLAG_ALBF                            (RTC_INITSTS_ALBF)
+#define RTC_FLAG_ALAF                            (RTC_INITSTS_ALAF)
+#define RTC_FLAG_INITF                           (RTC_INITSTS_INITF)
+#define RTC_FLAG_RSYF                            (RTC_INITSTS_RSYF)
+#define RTC_FLAG_INITSF                          (RTC_INITSTS_INITSF)
+#define RTC_FLAG_SHOPF                           (RTC_INITSTS_SHOPF)
+#define RTC_FLAG_WTWF                            (RTC_INITSTS_WTWF)
+#define RTC_FLAG_ALBWF                           (RTC_INITSTS_ALBWF)
+#define RTC_FLAG_ALAWF                           (RTC_INITSTS_ALAWF)
+
+/** RTC_Interrupts_Definitions **/
+#define RTC_INT_WUT                              (RTC_CTRL_WTIEN)
+#define RTC_INT_ALRB                             (RTC_CTRL_ALBIEN)
+#define RTC_INT_ALRA                             (RTC_CTRL_ALAIEN)
+
+
+/** Reset and init **/
+ErrorStatus RTC_DeInit(void);
+ErrorStatus RTC_Init(const RTC_InitType* RTC_InitParam);
+void RTC_StructInit(RTC_InitType* RTC_InitParam);
+void RTC_EnableWriteProtection(FunctionalState Cmd);
+ErrorStatus RTC_EnterInitMode(void);
+void RTC_ExitInitMode(void);
+ErrorStatus RTC_WaitForSynchro(void);
+ErrorStatus RTC_EnableRefClock(FunctionalState Cmd);
+void RTC_EnableBypassShadow(FunctionalState Cmd);
+
+/** Time and date configuration **/
+void RTC_TimeStructInit(RTC_TimeType* RTC_TimeStruct);
+ErrorStatus RTC_ConfigTime(uint32_t RTC_Format, const RTC_TimeType* RTC_TimeStruct);
+void RTC_GetTime(uint32_t RTC_Format, RTC_TimeType* RTC_TimeStruct);
+uint32_t RTC_GetSubSecond(void);
+void RTC_DateStructInit(RTC_DateType* RTC_DateStruct);
+ErrorStatus RTC_SetDate(uint32_t RTC_Format, RTC_DateType* RTC_DateStruct);
+void RTC_GetDate(uint32_t RTC_Format, RTC_DateType* RTC_DateStruct);
+
+/** Alarm configuration **/
+void RTC_SetAlarm(uint32_t RTC_Format, uint32_t RTC_Alarm, const RTC_AlarmType* RTC_AlarmStruct);
+void RTC_AlarmStructInit(RTC_AlarmType* RTC_AlarmStruct);
+void RTC_GetAlarm(uint32_t RTC_Format, uint32_t RTC_Alarm, RTC_AlarmType* RTC_AlarmStruct);
+ErrorStatus RTC_EnableAlarm(uint32_t RTC_Alarm, FunctionalState Cmd);
+void RTC_ConfigAlarmSubSecond(uint32_t RTC_Alarm, uint32_t RTC_AlarmSubSecondValue, uint32_t RTC_AlarmSubSecondMask);
+uint32_t RTC_GetAlarmSubSecond(uint32_t RTC_Alarm);
+
+/** Wakeup timer **/
+void RTC_ConfigWakeUpClock(RTC_WAKE_UP_CLOCK WakeUpClock);
+void RTC_SetWakeUpCounter(uint32_t RTC_WakeUpCounter);
+uint32_t RTC_GetWakeUpCounter(void);
+ErrorStatus RTC_EnableWakeUp(FunctionalState Cmd);
+
+/** Daylight saving **/
+void RTC_ConfigDayLightSaving(uint32_t RTC_DayLightSaving, uint32_t RTC_StoreOperation);
+uint32_t RTC_GetStoreOperation(void);
+
+/** Output pin configuration **/
+void RTC_ConfigOutput(uint32_t RTC_Output, uint32_t RTC_OutputPolarity);
+void RTC_ConfigOutputType(uint32_t RTC_OutputType);
+
+/** Calibration **/
+void RTC_EnableCalibOutput(FunctionalState Cmd);
+void RTC_ConfigCalibOutput(uint32_t RTC_CalibOutput);
+ErrorStatus RTC_ConfigSmoothCalib(uint32_t RTC_SmoothCalibPeriod,
+                                  uint32_t RTC_SmoothCalibPlusPulses,
+                                  uint32_t RTC_SmouthCalibMinusPulsesValue);
+
+/** Shift control synchronization **/
+ErrorStatus RTC_ConfigSynchroShift(uint32_t RTC_ShiftAdd1S, uint32_t RTC_ShiftSubFS);
+
+/** Interrupt and flag management **/
+void RTC_ConfigInt(uint32_t RTC_INT, FunctionalState Cmd);
+FlagStatus RTC_GetFlagStatus(uint32_t RTC_FLAG);
+void RTC_ClrFlag(uint32_t RTC_FLAG);
+INTStatus RTC_GetITStatus(uint32_t RTC_INT);
+void RTC_ClrIntPendingBit(uint32_t RTC_INT);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /*__N32WB033_RTC_H__ */

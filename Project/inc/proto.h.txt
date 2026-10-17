@@ -1,0 +1,336 @@
+#ifndef PROTO_H
+#define PROTO_H
+
+#include <stdint.h>
+#include "core.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "type.h"
+
+enum {
+    PROTO_PORT_BLE_MASTER = 0,   /* 从机 */
+    PROTO_PORT_BLE_SLAVE  = 1,   /* 主机 */
+    PROTO_PORT_UART1      = 2,   /* UART1 */
+    PROTO_PORT_UART2      = 3,   /* UART1 */
+    PROTO_PORT_NUM        = 4
+};
+
+#define PROTO_HEAD1   0x55u
+#define PROTO_HEAD2   0xAAu
+#define PROTO_FRAME_MAX 288u
+
+#define YB_N32W_BLE_002_HOST		65
+#define YB_N32W_BLE_002_SLAVE		2
+typedef struct
+{
+    Byte SCD:   1 ;  //短路
+    Byte OCC2:  1 ;
+    Byte OCD2:  1 ;
+    Byte OCC1:  1 ;
+    Byte OCD1:  1 ;
+    Byte CUV:   1 ;
+    Byte COV:   1 ;
+	Byte IWTF:  1 ;    
+}ALMTy;
+typedef struct
+{
+    Byte CST0: 1;
+    Byte CST1: 1;
+    Byte CST2: 1;
+    Byte CST3: 1;
+    Byte CC2F: 1;
+    Byte CC1F: 1;
+    Byte VADF: 1;
+	Byte PD  : 1;      
+}StaTy;
+typedef struct
+{
+    Byte CHGF  :1;  //充电MOS状态
+    Byte DSGF  :1;  //放电MOS状态
+    Byte PCHGF :1;
+    Byte PDSGF :1;
+    Byte rev   :4;   
+}CDmosTay;
+typedef struct
+{
+    Byte CHGC:2;     //充电控制
+    Byte DSGC:2;     //放电控制
+    Byte DSGM:1;
+    Byte PCHGC:1;
+    Byte PDSGC:1;
+	Byte LDPU:1; 
+}CNT0y;
+typedef struct
+{
+	Byte Sw:  1;
+	Byte And: 1;
+	Byte Vref:1;
+    Byte Communication:1;    //软件连接状态
+	Byte sCmos:  1;
+	Byte sDmos:  1;
+	Byte Cmos: 1;
+	Byte Dmos: 1;
+}ParallelStateType;
+typedef struct 
+{
+	Byte :5;
+	Byte BleCtrlPCHGMos:1; 	//蓝牙控制预放mos位
+	Byte BleCtrlChgMos:1;	//蓝牙控制充电mos位
+	Byte BleCtrlDisChgMos:1;//蓝牙控制放电mos位
+}BleCtrlMosType;//蓝牙控制mos变量
+
+typedef enum 
+{
+    CHARGING_MODE_NORMAL = 0X01,  // 正常模式
+    CHARGING_MODE_SMART  = 0X02,  // 智能模式
+} ChargingMode_t;
+
+typedef struct
+{
+    UInt16 SlaveModel	:4;
+    UInt16  HostModel	:12;
+}BatteryCodeType;
+
+typedef struct 
+{
+	UInt16 Cell[24];             //每个电压(0-47)
+	
+	Byte HighestVoltageBat;      //电压最高的那个电池(48)
+	Byte LowVoltageBat;          //电压最低的那个电池(49)
+	SByte Soc;                   //容量百分比(50)
+	SByte Soh;                    //健康度(51)
+	
+	UInt32 Voltage;              //总电压(52-55) 
+	Int32 Current;               //电流(56-59)
+	
+    SByte TemperatureLow;        //电池温度低(60)
+    SByte TemperatureHight;      //电池温度高(61)
+	BatteryCodeType BatteryCode; //项目编号(62-63)
+	
+	SByte Rmstemperature;        //有效温度(64)
+	Byte errorFlag;				//(65)
+	SByte Soe;				//(66-67)
+	Byte dc_ir;				//(66-67)
+	
+	Int32 Capacity;             //剩余容量(68-71)
+	
+	UInt16 UsageTimes;           //使用次数(72-73)
+	Byte State[2];                	//状态(74-75)
+	
+	Byte Error[2];             		//BMS故障(76-77)
+    Byte ChargeCurrentMax;             	//当前最大充电电流(78)
+    Byte DisChargeCurrentMax;         	//当前最大放电电流(79)
+	
+	UInt16 RemainingChargingTime;    	//剩余充电时间(80-81)
+	UInt16 RemainingDisChargingTime;  	//剩余放电时间(82-83)
+	
+	UInt32 Version;                  	//外部版本号(84-87)
+}_vbat;
+
+typedef struct { Byte scd:1,occ2:1,ocd2:1,occ1:1,ocd1:1,cuv:1,cov:1,iwtf:1; } proto_alm_t;
+typedef struct { Byte cst0:1,cst1:1,cst2:1,cst3:1,cc2f:1,cc1f:1,vadf:1,pd:1; } proto_sta_t;
+typedef struct { Byte chg_fault:1,dsg_fault:1,prechg_fault:1,predsg_fault:1,reserved:4; } proto_cdmos_t;
+typedef struct { Byte chg_ctrl:2,dsg_ctrl:2,dsg_mode:1,prechg_ctrl:1,predsg_ctrl:1,ldpu:1; } proto_cnt0_t;
+typedef struct { Byte sw:1,and_gate:1,vref:1,communication:1,s_cmos:1,s_dmos:1,cmos:1,dmos:1; } proto_parallel_t;
+typedef struct { Byte :5,prechg_mos:1,charge_mos:1,discharge_mos:1; } proto_ble_mos_t;
+
+typedef struct {
+	_vbat vbat;	//电池数据 	0-87
+	SByte VCT;	//AFE芯片温度88
+    ALMTy Alm;	//AFE警告	89
+    StaTy Sta;	//AFE状态	90
+    CDmosTay CDmosTa;//AFEmos状态91
+    Byte  Banlace[3]; //AFE均衡状态92-94
+    CNT0y  CD_Cn;	//AFEmos控制状态95
+	UInt32 dataErr;	//96-99
+	Byte CheXing;	//100
+	Byte rev[6];	//101-106
+	Byte StudySoc;	//107
+	Byte SystemStat; //系统状态108
+	ParallelStateType State; //电池状态109
+	Byte Spb;//电池保护状态110
+	Byte rev2[4];	//111-114
+	Byte BatteryShortCountL;//电池短路次数115
+	Byte BatteryShortCountH;//电池短路次数116
+	Byte rev3[2];	//117-118
+    Byte CMOS_TEMP_L; 	//充电mos温度119
+    Byte CMOS_TEMP_H; 	//充电mos温度120
+    Byte DMOS_TEMP_L;	//放电mos温度121
+    Byte DMOS_TEMP_H;	//放电mos温度122
+	Byte rev4[4];	//123-126
+	Byte Mos_pb; //mos温度保护状态127
+	float BaseCapacity;	//参考容量128-131
+	float RemainingCapacity;	//剩余容量132-135
+	BleCtrlMosType BleCtrlMos;	//国轩mos控制位(136)
+	Byte YbpModel;//仪表盘显示模式137
+	Byte vBatUseFlag;	//138
+	Byte BAT_Dcr;	//DCR直流内阻139
+	Byte vbatStat;		//电池mos控制状态，电池充放电状态140
+	ChargingMode_t CurrentChargingMode;//充电状态模式141
+	Byte is4GPowerFlag;//允许开4G电源标志142
+	Byte _4GPowerStat;//开4G电源标志143
+	Byte vBatActivationStatus;//电池激活状态144
+	Byte isCat1Online;//4G联网145
+	Byte isAppline;//APP在线146
+	Byte cat1version[3];//cat1版本号147-149
+	UInt16 vbatCell[8];	//32串电池的后8节电池电压150-165
+	Byte rev7[2];//166-167
+}com_0x11_type;
+
+typedef struct 
+{
+    Byte Process;              //当前步骤(0)-1
+    SByte ZeroCurrentValue;    //零电流值(1)-2
+    Byte ChargeSuccess;        //充电成功标志(2)-3
+    Byte DisChargeSuccess;     //放电成功标志(3)-4
+    
+    Byte Full;                  //电池充满(4)-5
+    Byte Empty;                 //电池放空(5)-6
+	
+    Byte ChargeStart;           //充电开始(6)-7
+    Byte DisChargeStart;        //放电开始(7)-8  
+    
+    UInt16 ChargeSuccessCount;     //学习充电成功次数(8-9)-9
+    UInt16 DisChargeSuccessCount;  //学习放电成功次数(10-11)-10
+    
+    float CurrentCorrectValue_C;   //充电流修正值(12-15)-11
+    float CurrentCorrectValue_D;   //放电流修正值(16-19)-12
+    
+	float ChargeCapacity;          //充电积分的容量(20-23)-13
+	float DisChargeCapacity;       //放电积分的容量(24-27)-14
+    
+    float ChargeSteteEnergy;       //当前充电能量(28-31)-15
+    float DisChargeSteteEnergy;    //当前放电能量(32-35)-16
+    
+    float FirstCapacity;           //首次学习的容量(36-39)-17
+    float FirstSteteEnergy;        //首次学习的能量(40-43)-18
+    
+    float LastChargeCapacity;      //最后一次充电成功容量(44-47)-19
+    float LastDisChargeCapacity;   //最后一次放电成功容量(48-51) -20
+
+    float LastChargeSteteEnergy;   //最后一次充电能量(52-55)-21
+    float LastDisChargeSteteEnergy;//最后一次放电能量 (56-59)-22
+    
+    float BaseCapacity;            //参考学习的容量(60-63)-23
+    float BaseSteteEnergy;         //参考学习的能量(64-67)-24
+    
+    float RemainingCapacity;       //当前剩余的容量(68-71)-25
+    float RemainingSteteEnergy;    //当前剩余能量(72-75)  -26
+    
+    float TotalChargeCapacity;     //总充电容量(76-79)  -27
+    float TotalDisChargeCapacity;  //总放电容量(80-83)  -28
+
+    float UseBaseCapacity;          //可用的参考容量
+    float RemainingCapacity1;       //观测剩余容量
+    Byte Soc;                       //SOC
+    Byte NC[3];
+	UInt32 rev[8];					//保留(88-123)
+}StudyType;
+
+#pragma pack(push, 1)
+typedef struct {
+    UInt32 pack_voltage_mv;          /* buffer[128] */
+    Int32  pack_current_ma;          /* buffer[132] */
+    UInt16 highest_cell_mv;          /* buffer[136] */
+    UInt16 lowest_cell_mv;           /* buffer[138] */
+    Int16  cell_delta_mv;            /* buffer[140] */
+    SByte   soc_percent;              /* buffer[142] */
+    SByte   soh_percent;              /* buffer[143] */
+    SByte   soe_percent;              /* buffer[144] */
+    Byte  reserved_a;               /* buffer[145] */
+    SByte   rms_temperature_c;        /* buffer[146] */
+    Byte  max_charge_current;       /* buffer[147] */
+    Byte  max_discharge_current;    /* buffer[148] */
+    Byte  current_max_charge_current; /* buffer[149] */
+    Byte  current_max_discharge_current; /* buffer[150] */
+    UInt16 max_cell_voltage_mv;      /* buffer[151-152] */
+    Byte  battery_dcr;              /* buffer[153] */
+    UInt16 fill_cell_max_mv;         /* buffer[154-155] */
+    UInt16 fill_cell_min_mv;         /* buffer[156-157] */
+    Byte  ocv_soc_percent;          /* buffer[158] */
+    Byte  reserved_b;               /* buffer[159] */
+    UInt16 fill_cell_average_mv;     /* buffer[160-161] */
+    UInt16 fill_cell_used_mv;        /* buffer[162-163] */
+} proto_study_ext_t;                  /* 36B */
+#pragma pack(pop)
+
+typedef char proto_sz_x11_ok[(sizeof(com_0x11_type) == 168u) ? 1 : -1];
+typedef char proto_sz_study_ok[(sizeof(StudyType) == 128u) ? 1 : -1];
+typedef char proto_sz_ext_ok[(sizeof(proto_study_ext_t) == 36u) ? 1 : -1];
+
+#define PROTO_TARGET_NAME_SIZE 24u
+
+/* 0x81 屏数据应答 reply[3]：屏与 BMS 的连接状态。 */
+typedef enum
+{
+    PROTO_BMS_DISCONNECTED = 0,      /* 未连接电池 / 已解绑 */
+    PROTO_BMS_CONNECTED = 1,         /* BMS 数据通道已就绪 */
+    PROTO_BMS_CONNECTING = 2,        /* 等待连接 / 服务发现中 */
+    PROTO_BMS_CONNECTION_FAILED = 3  /* 本轮连接超时失败，已停止，等待新请求 */
+} proto_bms_connection_state_t;
+
+typedef struct
+{
+    Byte mac_msb[6]; /* 全 0 表示未知，协议应答 MAC 字段留空。 */
+    Byte name[PROTO_TARGET_NAME_SIZE];
+} proto_peer_info_t;
+
+typedef struct
+{
+    Int16 (*local_name_set)(const Byte *name, UInt16 length);
+    Int16 (*local_mac_set)(const Byte mac_msb[6]);
+    Int16 (*target_name_set)(const Byte *name, UInt16 length);
+    Int16 (*target_address_set)(const Byte mac_msb[6]);
+    Int16 (*target_clear)(void);
+    Byte (*bms_ready)(void);
+    Int16 (*bms_peer_get)(proto_peer_info_t *peer); /* 连接中优先返回目标，否则读取当前对端。 */
+    Byte (*bms_connection_state)(void); 
+    UInt16 (*local_project_no_get)(void);
+    Int16 (*local_identity_set)(const Byte *name, UInt16 length, const Byte mac_msb[6]);
+} proto_app_ops_t;
+
+void Proto_Init(const proto_app_ops_t *ops);
+void Proto_BmsDataInvalidate(void);
+Int16 Proto_BindPort(Byte port, device_t *device);
+void Proto_UartRxCallback(Byte port, const Byte *data, UInt16 length);
+void Proto_BleRxCallback(Byte port, const Byte *data, UInt16 length);
+
+Byte Proto_PhoneRxCallback(const Byte *data, UInt16 length);
+Byte Proto_BleLocalRxPending(void);
+void Proto_PhoneRxReset(void);
+UInt16 Proto_Crc16(const Byte *data, UInt16 length);
+UInt16 Proto_Pack(Byte type, Byte command, const Byte *data, UInt16 data_length, Byte *output, UInt16 output_size);
+Int16 Proto_Send(Byte port, Byte type, Byte command, const Byte *data, UInt16 data_length);
+Byte Proto_IsBatteryStatusReady(void);
+Byte Proto_IsStudyDataReady(void);
+const com_0x11_type *Proto_GetBatteryStatus(void);
+const StudyType *Proto_GetStudyData(void);
+void proto_handle_target_data(Byte port, Byte type);
+void Proto_TargetRequestReset(void);
+Int16 Proto_TargetConnectionFailedNotify(void);
+
+#define PROTO_CMD_HOST        		0x10u
+#define PROTO_CMD_X11          		0x11u
+#define PROTO_CMD_UPDATE       		0x15u
+#define PROTO_CMD_X16          		0x16u
+
+#define PROTO_CMD_SET_LOCAL_IDENTITY 0x19u
+#define PROTO_CMD_SET_LOCAL_NAME 	0x27u
+#define PROTO_CMD_SET_LOCAL_MAC  	0x28u
+
+#define PROTO_CMD_SET_TARGET   		0x81u
+#define PROTO_TARGET_SCREEN_DATA    0x00u
+#define PROTO_TARGET_NAME      		0x01u
+#define PROTO_TARGET_MAC       		0x02u
+#define PROTO_TARGET_UNBIND         0x03u
+#define PROTO_TARGET_DISPLAY_MODE   0x04u
+#define PROTO_TARGET_DISPLAY_MODR   PROTO_TARGET_DISPLAY_MODE 
+#define PROTO_TARGET_MAC_TEXT_SIZE 	17u
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* PROTO_H */

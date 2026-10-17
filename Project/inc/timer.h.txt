@@ -1,0 +1,47 @@
+/**
+ * @file    timer.h
+ * @brief   GTIM1 millisecond system-tick driver (polling-free time base)
+ *
+ *          One general-purpose timer (GTIM1) generates a 1 ms update
+ *          interrupt. The ISR only increments a 32-bit tick counter;
+ *          everything else (callbacks, timeouts) stays in task context.
+ *
+ *          Interrupt registration follows the ROM-dispatcher rule:
+ *          ModuleIrqRegister(TIMER_TICK_IRQn, TIMER_TICK_IRQHandler)
+ *          must be called after NVIC_Init (same pattern as uart.c).
+ */
+#ifndef __TIMER_H__
+#define __TIMER_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "n32wb033_tim.h"
+
+/* ---- hardware resources owned by this driver ---- */
+#define TIMER_TICK_TIM              GTIM1
+#define TIMER_TICK_CLK_ENABLE()     RCC_EnableAPB1PeriphClk(RCC_APB1_PERIPH_GTIM1, ENABLE)
+#define TIMER_TICK_IRQn             GTIM1_IRQn
+#define TIMER_TICK_IRQHandler       GTIM1_IRQHandler   /* also the vector name in startup file */
+
+#define TIMER_TICK_HZ               1000u              /* 1 tick = 1 ms */
+
+/** Configure GTIM1 for a 1 ms update interrupt and register the ISR. */
+void     Timer_Init(void);
+
+/** Milliseconds elapsed since Timer_Init(). Wraps at 2^32 ms (~49.7 days). */
+uint32_t Timer_GetTick(void);
+
+/** Wrap-safe timeout check: 1 = dur_ms elapsed since start tick. */
+uint8_t  Timer_Elapsed(uint32_t start_tick, uint32_t dur_ms);
+
+/** Busy-wait ms delay. Boot phase / pre-scheduler use only - never in
+ *  task or callback context of the cooperative main loop. */
+void     Timer_DelayMs(uint32_t ms);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __TIMER_H__ */

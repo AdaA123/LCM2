@@ -1,0 +1,520 @@
+/**
+*     Copyright (c) 2025, NSING Technologies Inc.
+* 
+*     All rights reserved.
+*
+*     This software is the exclusive property of NSING Technologies Inc. (Hereinafter 
+* referred to as NSING). This software, and the product of NSING described herein 
+* (Hereinafter referred to as the Product) are owned by NSING under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     NSING does not grant any license under its patents, copyrights, trademarks, or other 
+* intellectual property rights. Names and brands of third party may be mentioned or referred 
+* thereto (if any) for identification purposes only.
+*
+*     NSING reserves the right to make changes, corrections, enhancements, modifications, and 
+* improvements to this software at any time without notice. Please contact NSING and obtain 
+* the latest version of this software before placing orders.
+
+*     Although NSING has attempted to provide accurate and reliable information, NSING assumes 
+* no responsibility for the accuracy and reliability of this software.
+* 
+*     It is the responsibility of the user of this software to properly design, program, and test 
+* the functionality and safety of any application made of this information and any resulting product. 
+* In no event shall NSING be liable for any direct, indirect, incidental, special,exemplary, or 
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     NSING Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property 
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify NSING and hold NSING 
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related 
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not 
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by NSING, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     NSING products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations. 
+* User shall comply with any applicable export control laws and regulations promulgated and administered by 
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+
+/**
+ * @file ns_dfu_serial.c
+ * @author NSING Firmware Team
+ * @version v1.0.0
+ *
+ * @copyright Copyright (c) 2025, NSING Technologies Inc. All rights reserved.
+ */
+
+/** @addtogroup 
+ * @{
+ */
+
+ /* Includes ------------------------------------------------------------------*/
+#include "ns_dfu_serial.h"
+#include "ns_scheduler.h"
+#include "ns_dfu_boot.h"
+#include "dfu_usart.h"
+#include "n32wb033.h"
+#include "ns_error.h"
+#include "dfu_crc.h"
+#include "n32wb033_usart.h"
+#include "misc.h"
+#include "dfu_log.h"
+/* Private typedef -----------------------------------------------------------*/
+static struct
+{
+    uint8_t buffer[4096];
+    uint32_t offset;
+}m_pkt;
+
+typedef struct 
+{
+    uint32_t crc;
+    uint32_t app_start_address;
+    uint32_t app_size;
+    uint32_t app_crc;
+    uint32_t app_version;
+    uint32_t reserve[10];
+}_init_pkt;
+static _init_pkt m_init_pkt;
+typedef struct 
+{
+    uint32_t offset;
+    uint32_t size;
+    uint32_t crc;
+}_pkt_header;
+
+/* Private define ------------------------------------------------------------*/
+#define  DFU_SERIAL_HEADER_2                        0xAA
+#define  DFU_SERIAL_HEADER_20                       0xBB
+#define  DFU_SERIAL_HEADER_80                       0xCC
+#define  DFU_SERIAL_HEADER_256                      0xDD
+#define  DFU_SERIAL_CMD_Ping_Ext                    0x81
+#define  DFU_SERIAL_CMD_InitPkt_Ext                 0x82
+#define  DFU_SERIAL_CMD_Pkt_header_Ext              0x83
+#define  DFU_SERIAL_CMD_Pkt_Ext                     0x84
+#define  DFU_SERIAL_CMD_PostValidate_Ext            0x85
+#define  DFU_SERIAL_CMD_ActivateReset_Ext           0x86
+#define  DFU_SERIAL_CMD_JumpToMasterBoot_Ext        0x87
+
+#define SCHED_EVT_RX_DATA            1
+#define SCHED_EVT_TIMEOUT            2
+
+static volatile uint32_t m_timeout_cnt = 0;
+static volatile uint32_t m_timeout_250ms = 0;
+
+/* Private constants ---------------------------------------------------------*/
+/* Private variables ---------------------------------------------------------*/
+static _pkt_header m_pkt_header;
+/* Private function prototypes -----------------------------------------------*/
+static void sched_evt(void * p_event_data, uint16_t event_size);
+//static uint32_t serial_send_data(uint8_t *p_data, uint32_t length);
+static uint32_t serial_send_data_ext(uint8_t *p_data, uint32_t length);
+static uint8_t m_buffer[256];
+
+static void dfu_serial_cmd_ping_ext(void);
+static void dfu_serial_cmd_init_pkt_ext(void);
+static void dfu_serial_cmd_pkt_header_ext(void);
+static void dfu_serial_cmd_pkt_ext(void);
+static void dfu_serial_cmd_postvalidate_ext(void);
+static void dfu_serial_cmd_activate_reset_ext(void);
+static void dfu_serial_cmd_jump_to_master_boot_ext(void);
+
+/* Private functions ---------------------------------------------------------*/
+#define FLASH_PAGE_SIZE        256
+
+ReturnMsg CMD_FLASH_WRITE(uint32_t addr, uint8_t* p_data, uint32_t len)
+{
+		ReturnMsg error = FlashOperationSuccess;
+    uint8_t num_of_page = 0, num_of_single = 0, address = 0, count = 0, temp = 0;
+
+    address = addr % FLASH_PAGE_SIZE;
+    count = FLASH_PAGE_SIZE - address;
+    num_of_page =  len / FLASH_PAGE_SIZE;
+    num_of_single = len % FLASH_PAGE_SIZE;
+    if (address == 0)
+    {   
+        if (num_of_page == 0) 
+        {
+						error = ATOMIC_QPP(addr,p_data, len);
+						if(error != FlashOperationSuccess)goto END;
+        }
+        else 
+        {
+            while (num_of_page--)
+            {
+								error = ATOMIC_QPP(addr,p_data, FLASH_PAGE_SIZE);
+								if(error != FlashOperationSuccess)goto END;
+                addr +=  FLASH_PAGE_SIZE;
+                p_data += FLASH_PAGE_SIZE;
+            }
+						error = ATOMIC_QPP(addr,p_data, num_of_single);
+						if(error != FlashOperationSuccess)goto END;
+        }
+    }
+    else 
+    {
+        if (num_of_page == 0)
+        {
+            if (num_of_single > count) 
+            {
+                temp = num_of_single - count;
+								error = ATOMIC_QPP(addr,p_data, count);
+								if(error != FlashOperationSuccess)goto END;
+                addr +=  count;
+                p_data += count;
+								error = ATOMIC_QPP(addr,p_data, temp);
+								if(error != FlashOperationSuccess)goto END;
+            }
+            else
+            {
+								error = ATOMIC_QPP(addr,p_data, len);
+								if(error != FlashOperationSuccess)goto END;
+            }
+        }
+        else 
+        {
+            len -= count;
+            num_of_page =  len / FLASH_PAGE_SIZE;
+            num_of_single = len % FLASH_PAGE_SIZE;
+
+						error = ATOMIC_QPP(addr,p_data, count);
+						if(error != FlashOperationSuccess)goto END;
+            addr +=  count;
+            p_data += count;
+
+            while (num_of_page--)
+            {
+							  error = ATOMIC_QPP(addr,p_data, FLASH_PAGE_SIZE);
+								if(error != FlashOperationSuccess)goto END;
+                addr +=  FLASH_PAGE_SIZE;
+                p_data += FLASH_PAGE_SIZE;
+            }
+
+            if (num_of_single != 0)
+            {
+								error = ATOMIC_QPP(addr,p_data, num_of_single);
+								if(error != FlashOperationSuccess)goto END;
+            }
+        }
+    }
+		
+		END:		
+		
+	return error;	
+}	
+
+/**
+ * @brief Initialize serial dfu.
+ * @param[in] none.
+ * @return none
+ */
+void ns_dfu_serial_init(void)
+{
+    dfu_usart1_interrupt_config();
+    dfu_usart1_enable();
+}
+
+
+
+/**
+ * @brief Process data received from serial port.
+ * @param[in] p_event_data event type.
+ * @param[in] event_size event size.
+ * @return none
+ */
+static void sched_evt(void * p_event_data, uint16_t event_size)
+{
+    switch(*(uint8_t *)p_event_data)
+    {
+        case SCHED_EVT_RX_DATA:{
+							switch(m_buffer[1]){  
+									case DFU_SERIAL_CMD_Ping_Ext:{
+										LOG_PRINTF("DFU_SERIAL_CMD_Ping_Ext\r\n");
+											dfu_serial_cmd_ping_ext();
+									}break;
+									case DFU_SERIAL_CMD_InitPkt_Ext:{
+										LOG_PRINTF("DFU_SERIAL_CMD_InitPkt_Ext\r\n");
+											dfu_serial_cmd_init_pkt_ext();
+									}break;
+									case DFU_SERIAL_CMD_Pkt_header_Ext:{
+										LOG_PRINTF("DFU_SERIAL_CMD_Pkt_header_Ext\r\n");
+											dfu_serial_cmd_pkt_header_ext();
+									}break;
+									case DFU_SERIAL_CMD_Pkt_Ext:{
+										LOG_PRINTF("DFU_SERIAL_CMD_Pkt_Ext\r\n");
+											dfu_serial_cmd_pkt_ext();
+									}break;
+									case DFU_SERIAL_CMD_PostValidate_Ext:{
+										LOG_PRINTF("DFU_SERIAL_CMD_PostValidate_Ext\r\n");
+											dfu_serial_cmd_postvalidate_ext();
+									}break;
+									case DFU_SERIAL_CMD_ActivateReset_Ext:{
+										LOG_PRINTF("DFU_SERIAL_CMD_ActivateReset_Ext\r\n");
+											dfu_serial_cmd_activate_reset_ext();
+									}break;                    
+									case DFU_SERIAL_CMD_JumpToMasterBoot_Ext:{
+										LOG_PRINTF("DFU_SERIAL_CMD_JumpToMasterBoot_Ext\r\n");
+											dfu_serial_cmd_jump_to_master_boot_ext();
+									}break;   
+							}
+        }break;
+				case SCHED_EVT_TIMEOUT:{
+					SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;
+					NVIC_SystemReset();
+				}break;				
+    }
+}
+/**
+ * @brief Ping the board.
+ * @param[in] none.
+ * @return none
+ */
+static void dfu_serial_cmd_ping_ext(void)
+{
+    uint8_t cmd[] = {DFU_SERIAL_HEADER_2,DFU_SERIAL_CMD_Ping_Ext};
+    serial_send_data_ext(cmd, sizeof(cmd));
+}
+/**
+ * @brief Process init packet.
+ * @param[in] none.
+ * @return none
+ */
+static void dfu_serial_cmd_init_pkt_ext(void)
+{
+    uint8_t error = 0;
+    memcpy(&m_init_pkt,m_buffer+2,sizeof(_init_pkt));
+    if(m_init_pkt.crc != dfu_crc32((uint8_t *)&m_init_pkt.crc + 4, sizeof(_init_pkt) - 4))
+    {
+        error = 1;
+    }
+    uint8_t cmd[] = {DFU_SERIAL_HEADER_80,DFU_SERIAL_CMD_InitPkt_Ext,error};
+    serial_send_data_ext(cmd, sizeof(cmd));
+}
+
+
+/**
+ * @brief Process packet header.
+ * @param[in] none.
+ * @return none
+ */
+static void dfu_serial_cmd_pkt_header_ext(void)
+{
+    m_pkt.offset = 0;
+    uint8_t error = 0;
+    memcpy(&m_pkt_header,m_buffer+2,sizeof(_pkt_header));
+    uint8_t cmd[] = {DFU_SERIAL_HEADER_20,DFU_SERIAL_CMD_Pkt_header_Ext,error};
+    serial_send_data_ext(cmd, sizeof(cmd));    
+}
+/**
+ * @brief Process packet data.
+ * @param[in] none.
+ * @return none
+ */
+static void dfu_serial_cmd_pkt_ext(void)
+{    
+    uint8_t error = 0;
+    memcpy(m_pkt.buffer+m_pkt.offset,m_buffer+3,m_buffer[2]);    
+    m_pkt.offset += m_buffer[2];
+    if(m_pkt.offset >= m_pkt_header.size)
+    {
+        if(m_pkt_header.crc == dfu_crc32(m_pkt.buffer, m_pkt_header.size))
+        {
+            ATOMIC_SE(m_init_pkt.app_start_address + m_pkt_header.offset);
+            CMD_FLASH_WRITE(m_init_pkt.app_start_address + m_pkt_header.offset, m_pkt.buffer, m_pkt_header.size);
+            if(m_pkt_header.crc != dfu_crc32((uint8_t *)((uint32_t)(m_init_pkt.app_start_address + m_pkt_header.offset)), m_pkt_header.size))
+            {
+                error = 1;
+            }
+        }
+        else
+        {
+            error = 1;
+        }
+    }
+    uint8_t cmd[] = {DFU_SERIAL_HEADER_256,DFU_SERIAL_CMD_Pkt_Ext,error};
+    serial_send_data_ext(cmd, sizeof(cmd));    
+}
+/**
+ * @brief Validate receviced data.
+ * @param[in] none.
+ * @return none
+ */
+static void dfu_serial_cmd_postvalidate_ext(void)
+{
+    uint8_t error = 0;
+    
+    if(m_init_pkt.app_crc != dfu_crc32((uint8_t *)((uint32_t)m_init_pkt.app_start_address), m_init_pkt.app_size))
+    {
+        error = 1;
+    }
+    else{
+				 static NS_Bootsetting_t ns_bootsetting_new;	
+				 memcpy(&ns_bootsetting_new,(uint8_t *)NS_BOOTSETTING_TWO_START_ADDRESS,sizeof(NS_Bootsetting_t));
+				 ns_bootsetting_new.activation_code = NS_BOOTSETTING_ACTIVATE_APP1;
+				 ns_bootsetting_new.app1.start_address = m_init_pkt.app_start_address;
+				 ns_bootsetting_new.app1.size = m_init_pkt.app_size;
+				 ns_bootsetting_new.app1.version = m_init_pkt.app_version;
+				 ns_bootsetting_new.app1.crc = m_init_pkt.app_crc;
+				 ns_bootsetting_new.crc = dfu_crc32((uint8_t *)&ns_bootsetting_new.crc + 4, sizeof(NS_Bootsetting_t) - 4);
+				//更新bootsetting
+				//擦除bootsetting two
+				ATOMIC_SE(NS_BOOTSETTING_TWO_START_ADDRESS);                
+				//新bootsetting内容写入bootsetting two
+				CMD_FLASH_WRITE(NS_BOOTSETTING_TWO_START_ADDRESS, (uint8_t *)&ns_bootsetting_new, sizeof(NS_Bootsetting_t));
+				//擦除bootsetting one
+				ATOMIC_SE(NS_BOOTSETTING_ONE_START_ADDRESS);
+				//更新bootsetting one 
+				CMD_FLASH_WRITE(NS_BOOTSETTING_ONE_START_ADDRESS, (uint8_t *)&ns_bootsetting_new, sizeof(NS_Bootsetting_t));        
+				if(ns_bootsetting_new.crc != dfu_crc32((uint8_t *)((uint32_t)(NS_BOOTSETTING_ONE_START_ADDRESS + 4)), sizeof(NS_Bootsetting_t) - 4))
+				{
+						error = 2;
+				}         
+    }
+    uint8_t cmd[] = {DFU_SERIAL_HEADER_2,DFU_SERIAL_CMD_PostValidate_Ext,error};
+    serial_send_data_ext(cmd, sizeof(cmd));        
+}
+
+/**
+ * @brief Reset System.
+ * @param[in] none.
+ * @return none
+ */
+static void dfu_serial_cmd_activate_reset_ext(void)
+{
+    uint8_t error = 0;
+
+    uint8_t cmd[] = {DFU_SERIAL_HEADER_2,DFU_SERIAL_CMD_ActivateReset_Ext,error};
+    serial_send_data_ext(cmd, sizeof(cmd));        
+    
+    if(error == 0)
+    {
+			extern void system_delay_n_10us(uint32_t value);
+        system_delay_n_10us(100*100);
+        NVIC_SystemReset();
+        
+    }
+    
+    
+}
+static void dfu_serial_cmd_jump_to_master_boot_ext(void)
+{
+    uint8_t cmd[] = {DFU_SERIAL_HEADER_2,DFU_SERIAL_CMD_JumpToMasterBoot_Ext};
+    serial_send_data_ext(cmd, sizeof(cmd));
+}
+
+
+
+
+void USART1_IRQHandler(void) __attribute__((section("user_function_ram")));
+void USART1_IRQHandler(void)
+{
+    static uint32_t index = 0;
+    static uint8_t buffer[256];
+    static uint8_t event_flag = false;
+    //if(USART_GetFlagStatus(USART1, USART_FLAG_RXDNE) != RESET)
+		if ((USART1->STS & USART_FLAG_RXDNE) != (uint32_t)RESET)
+    {
+        buffer[index] = (uint32_t)(USART1->DAT & (uint32_t)0x01FF);//USART_ReceiveData(USART1);
+				if(buffer[0] == DFU_SERIAL_HEADER_2)
+				{
+					index++;
+					if(index == 2)
+					{
+						index = 0;    
+						m_buffer[0] = buffer[0];
+						m_buffer[1] = buffer[1];
+						event_flag = true;					
+					}
+				}
+				else if(buffer[0] == DFU_SERIAL_HEADER_20)
+				{
+					index++;
+					if(index == 20)
+					{
+						index = 0;    
+						memcpy(m_buffer,buffer, 20);
+						event_flag = true;				
+					}
+				}				
+				else if(buffer[0] == DFU_SERIAL_HEADER_80)
+				{
+					index++;
+					if(index == 80)
+					{
+						index = 0;    
+						memcpy(m_buffer,buffer, 80);
+						event_flag = true;					
+					}
+				}
+        else if(buffer[0] == DFU_SERIAL_HEADER_256)
+        {
+					index++;
+					if(index == 256)
+					{
+						index = 0;    
+						memcpy(m_buffer,buffer, 256);
+						event_flag = true;
+					}                            
+        }	
+				if(event_flag == true)
+				{
+					event_flag = false;
+					m_timeout_cnt = 0;
+					uint8_t event = SCHED_EVT_RX_DATA;
+					uint32_t    err_code = app_sched_event_put(&event ,sizeof(uint8_t),sched_evt);
+					ERROR_CHECK(err_code);					
+				}
+    }    
+}
+
+
+
+//static uint32_t serial_send_data(uint8_t *p_data, uint32_t length)
+//{
+//    uint8_t cmd[256];
+//    memset(cmd,0,sizeof(cmd));
+//    memcpy(cmd,p_data,length);
+//    dfu_usart1_send(cmd,sizeof(cmd));
+//    return 0;
+//}
+static uint32_t serial_send_data_ext(uint8_t *p_data, uint32_t length)
+{
+    dfu_usart1_send(p_data,length);
+    return 0;
+}
+
+
+
+
+void timeout_init(uint32_t timeout_second)
+{
+	m_timeout_250ms = timeout_second*4;
+	SysTick_CLKSourceConfig(SysTick_CLKSource_HCLK_Div8);
+	SysTick_Config(0xFFFFFFUL-1);//the systick interrupt interval is 250ms
+	NVIC_SetPriority(SysTick_IRQn, 2);
+}
+void SysTick_Handler(void) __attribute__((section("user_function_ram")));
+void SysTick_Handler(void)
+{
+	m_timeout_cnt++;
+	if(m_timeout_cnt >= m_timeout_250ms)
+	{
+		uint8_t event = SCHED_EVT_TIMEOUT;
+		uint32_t err_code = app_sched_event_put(&event ,sizeof(uint8_t),sched_evt);
+		ERROR_CHECK(err_code);			
+	}
+}
+
+
+
+

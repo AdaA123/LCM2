@@ -1,0 +1,64 @@
+#ifndef __YL1650_H
+#define __YL1650_H
+
+#include <stdint.h>
+#include "n32wb033.h"
+#include "type.h"
+/* YL1650 命令宏定义 */
+#define C_WR_command        0x48        //设置系统参数指令
+
+#define C_RD_key_command    0x49        //读取按键值
+
+#define C_WR_display_on     0x01        //显示开
+#define C_WR_display_off    0x00        //显示关
+
+#define C_WR_display_work   0x00        //工作模式
+#define C_WR_display_sleep  0x04        //休眠模式
+
+#define C_WR_display_7bit   0x08        //7段
+#define C_WR_display_8bit   0x00        //8段
+
+#define C_WR_display_level1 0x10        //1级亮度
+#define C_WR_display_level2 0x20        //2级亮度
+#define C_WR_display_level3 0x30        //3级亮度
+#define C_WR_display_level4 0x40        //4级亮度
+#define C_WR_display_level5 0x50        //5级亮度
+#define C_WR_display_level6 0x60        //6级亮度
+#define C_WR_display_level7 0x70        //7级亮度
+#define C_WR_display_level8 0x00        //8级亮度
+
+#define C_WR_addr_68    0x68        //地址
+#define C_WR_addr_6a    0x6a        //地址
+#define C_WR_addr_6c    0x6c        //地址
+#define C_WR_addr_6e    0x6e        //地址
+
+#define YL1650_CMD_SYS       0x48    /* 设置系统参数(亮度/显示开关)指令 */
+#define YL1650_CMD_READ_KEY  0x49    /* 读取按键指令 */
+
+/* 状态图标掩码 (对应 DIG4 的 bit5~bit7，按实际硬件微调) */
+#define YL1650_ICON_PERCENT  0x80    /* 百分号 % 图标 */
+#define YL1650_ICON_V        0x40    /* 电压 V 图标 */
+#define YL1650_ICON_BLE      0x20    /* 蓝牙图标 */
+
+#define YL1650_DISPLAY_MODE_SOC      1u
+#define YL1650_DISPLAY_MODE_VOLTAGE  2u
+
+Int16 YL1650_DisplayModeSet(Byte mode);
+Byte YL1650_DisplayModeGet(void);
+
+/* 初始化与启动 */
+void YL1650_Init(void);                          /* 上电启动并注册定时读写任务 */
+void YL1650_StartUp(void);                       /* 包含上电规范的完整启动流程 */
+void YL1650_IO_Init(void);                       /* 通信引脚初始化 */
+
+/* 显示控制接口 */
+void YL1650_UpdateDisplay(uint16_t val, Byte show_dp); /* 按 XX.X 格式显示 */
+void YL1650_SetBatteryLevel(Byte percentage); /* 刷新电量格 (0~100) */
+void YL1650_SetIcon(Byte mask, Byte state);/* 控制独立图标 */
+void YL1650_SetBrightness(Byte brightness);   /* 设置亮度 (0~7) */
+
+/* 按键接口 */
+Byte YL1650_ReadKey(void);                    /* 排队一次读操作并返回缓存值 */
+Byte YL1650_GetKey(void);                     /* 获取最近一次读取完成的按键值 */
+
+#endif /* __YL1650_H */

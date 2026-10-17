@@ -1,0 +1,30 @@
+/**
+ * @file app_fifo.h
+ * @brief [DEPRECATED] 旧中继队列接口已移除 (v2.0 业务层重构)
+ *
+ *        历史: 本文件曾声明 push_master_rx_data_to_fifo() /
+ *        pop_matser_rx_to_ble(), 组成 BMS->手机 的旧上行通道。
+ *        该通道绕过了业务层的武装门控与日志追踪, 且随连接复用存在
+ *        串包风险, 已于 v2.0 移除。
+ *
+ *        现行上行链路 (见 docs/07_中继网关业务层设计与实现说明.md):
+ *          app_rdtsc.c (BMS Notify)
+ *            -> ble_port_data_rx() -> Core FIFO -> my_ble.c [武装门控]
+ *            -> app_rdtss_notify_raw()  (单飞发送队列 + CFM 驱动)
+ *            -> ...0002 Notify -> 手机
+ */
+
+#ifndef __APP_FIFO_H__
+#define __APP_FIFO_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* v2.0: 无对外接口。保留文件以兼容既有 Keil/EIDE 工程结构。 */
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __APP_FIFO_H__ */

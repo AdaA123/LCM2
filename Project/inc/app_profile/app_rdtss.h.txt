@@ -1,0 +1,107 @@
+#ifndef APP_RDTSS_H_
+#define APP_RDTSS_H_
+
+#include "rwip_config.h"
+
+#if (BLE_RDTSS_SERVER)
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ------------------------------------------------------------------------ */
+/*  读请求固定返回的厂商信息 (RDTSS_VALUE_REQ_IND 应答)                       */
+/* ------------------------------------------------------------------------ */
+#define APP_RDTSS_MANUFACTURER_NAME       ("NSING")
+#define APP_RDTSS_MANUFACTURER_NAME_LEN   (5)
+
+/* ------------------------------------------------------------------------ */
+/*  128-bit UUID 小端 Raw Data (与手机 APP 写死的 UUID 严格一致)               */
+/*  全部基于标准蓝牙 Base UUID: 0000xxxx-0000-1000-8000-00805F9B34FB           */
+/*  (16-bit 别名 FF00/FF01/FF02); 5401/5400/180A 见 app_svc.h.                  */
+/* ------------------------------------------------------------------------ */
+/** 主服务 FF00 */
+#define ATT_SERVICE_GW_RDT_128            {0xFB,0x34,0x9B,0x5F,0x80,0x00,0x00,0x80, 0x00,0x10, 0x00,0x00, 0x00,0xFF,0x00,0x00}
+/** FF01 (旧 ...0002): 网关 -> 手机 上行通道, Read|Notify */
+#define ATT_CHAR_GW_TX_NTF_128            {0xFB,0x34,0x9B,0x5F,0x80,0x00,0x00,0x80, 0x00,0x10, 0x00,0x00, 0x01,0xFF,0x00,0x00}
+/** FF02 (旧 ...0001): 手机 -> 网关 下行入口, WriteWithoutResponse|Write */
+#define ATT_CHAR_GW_RX_WRITE_128          {0xFB,0x34,0x9B,0x5F,0x80,0x00,0x00,0x80, 0x00,0x10, 0x00,0x00, 0x02,0xFF,0x00,0x00}
+
+/* 旧宏名兼容别名 (历史代码/文档引用) */
+#define ATT_SERVICE_AM_SPEED_128          ATT_SERVICE_GW_RDT_128
+#define ATT_CHAR_AM_SPEED_WRITE_128       ATT_CHAR_GW_RX_WRITE_128
+#define ATT_CHAR_AM_SPEED_NTF_128         ATT_CHAR_GW_TX_NTF_128
+
+/* ------------------------------------------------------------------------ */
+/*  属性表索引 (与 app_rdtss.c 中 attm_desc_128 表严格一一对应)               */
+/*  RDTSS_VAL_WRITE_IND.handle / RDTSS_VAL_NTF_REQ.handle 均使用本索引        */
+/* ------------------------------------------------------------------------ */
+enum
+{
+    RDTSS_IDX_SVC = 0,            /* 0x2800 主服务 FF00 声明 (动态分配)          */
+
+    /* --- FF01 (Read|Notify) 上行通道: 声明 shdl+1 / 值 shdl+2 / CCCD shdl+3 --- */
+    RDTSS_IDX_NTF_CHAR,           /* 0x2803 FF01 特征声明 (shdl+1)         */
+    RDTSS_IDX_NTF_VAL,            /* FF01 值: 上行透传 Notify (shdl+2)     */
+    RDTSS_IDX_NTF_CFG,            /* 0x2902 CCCD (shdl+3)                  */
+
+    /* --- FF02 (WriteWithoutResponse|Write) 下行入口: 声明 shdl+4 / 值 shdl+5 --- */
+    RDTSS_IDX_WRITE_CHAR,         /* 0x2803 FF02 特征声明 (shdl+4)         */
+    RDTSS_IDX_WRITE_VAL,          /* FF02 值: 下行入口 (55AA 配网 + 透传)(shdl+5)*/
+
+    RDTSS_IDX_NB,
+};
+
+/// 表 of message handlers
+extern const struct app_subtask_handlers app_rdtss_handlers;
+
+/* ------------------------------------------------------------------------ */
+/*  对外接口                                                                  */
+/* ------------------------------------------------------------------------ */
+
+/** 注册 RDTSS 任务处理器 (GAPM_PROFILE_TASK_ADD 成功后内部调用) */
+void app_rdtss_init(void);
+
+/** 向协议栈注册 RDTSS 服务端数据库 (经 ble_port_cfg.prf_add 注入) */
+void app_rdtss_add_rdts(void);
+
+/**
+ * 取上行透传通道句柄: shdl + RDTSS_IDX_NTF_VAL (即 ...0002 特征值句柄)。
+ * v2.4: 上行 Notify 已改为 att_idx 寻址 (app_rdtss_notify_raw), 本函数仅调试用。
+ * @return 句柄; 0xFFFF = Profile 尚未就绪
+ */
+uint16_t app_rdtss_get_tx_handle(void);
+
+/** 取下行入口句柄: shdl + RDTSS_IDX_WRITE_VAL (即 ...0001, 调试/日志用) */
+uint16_t app_rdtss_get_rx_handle(void);
+
+/**
+ * 上行透传统一入口 (模块6): 将 BMS 数据经内部单飞队列 Notify 给手机。
+ * - 队列深度 GW_TX_Q_DEPTH, 满则丢包并计数打日志
+ * - CCCD 未订阅的连接直接拒收 (驱动 Profile 对关 CCCD 的静默丢包无 CFM,
+ *   必须在应用侧预判, 否则发送状态机会卡死)
+ * @return true=已入队/已发送, false=被丢弃
+ */
+bool app_rdtss_notify_raw(uint8_t conidx, uint16_t tx_token,
+                          const uint8_t *data, uint16_t length);
+
+/** 链路丢失回调: 清空该连接的待发队列并复位订阅状态 (my_ble 断链时调用) */
+void app_rdtss_on_link_lost(uint8_t conidx);
+
+/**
+ * [v6.2] 发送 CFM 看门狗轮询 (gw_relay_pump 每轮调用, 不依赖 ke_timer)。
+ * 忙位超阈值后保留 single-flight 所属关系；连续多次仍无 CFM 时断链，
+ * 由协议栈完成事件释放 Profile 操作，避免旧 CFM 被误认为新连接的确认。
+ */
+void app_rdtss_tx_poll(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // BLE_RDTSS_SERVER
+
+#endif // APP_RDTSS_H_

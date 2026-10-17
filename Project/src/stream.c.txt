@@ -1,0 +1,200 @@
+#include "stream.h"
+
+#define CHAR_STREAM_TX_IDLE        0u
+#define CHAR_STREAM_TX_SUBMITTING  1u
+#define CHAR_STREAM_TX_IN_FLIGHT   2u
+
+static uint8_t stream_is_valid(const stream_t *stream)
+{
+    return (uint8_t)((stream != 0) &&
+                     (RingBuf_IsValid(&stream->rx_fifo) != 0u) &&
+                     (RingBuf_IsValid(&stream->tx_fifo) != 0u) &&
+                     (stream->tx_stage != 0) &&
+                     (stream->tx_stage_capacity != 0u) &&
+                     (stream->submit != 0));
+}
+
+static void stream_drop_add(uint32_t *counter, uint16_t amount)
+{
+    if(*counter > (0xFFFFFFFFu - (uint32_t)amount))
+        *counter = 0xFFFFFFFFu;
+    else
+        *counter += amount;
+}
+
+int Stream_Init(stream_t *stream, uint8_t *rx_buffer, uint16_t rx_capacity, uint8_t *tx_buffer, uint16_t tx_capacity, uint8_t *tx_stage, uint16_t tx_stage_capacity, stream_submit_t submit, void *submit_context)
+{
+    if((stream == 0) || (rx_buffer == 0) || (rx_capacity < 2u) || (tx_buffer == 0) || (tx_capacity < 2u) || (tx_stage == 0) || (tx_stage_capacity == 0u) || (submit == 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    RingBuf_Init(&stream->rx_fifo, rx_buffer, rx_capacity);
+    RingBuf_Init(&stream->tx_fifo, tx_buffer, tx_capacity);
+    stream->tx_stage = tx_stage;
+    stream->tx_stage_capacity = tx_stage_capacity;
+    stream->tx_submit_limit = tx_stage_capacity;
+    stream->tx_state = CHAR_STREAM_TX_IDLE;
+    stream->tx_done_pending = 0u;
+    stream->rx_drop = 0u;
+    stream->tx_drop = 0u;
+    stream->submit = submit;
+    stream->submit_context = submit_context;
+    return CHAR_DEV_OK;
+}
+
+void Stream_Reset(stream_t *stream)
+{
+    if(stream_is_valid(stream) == 0u)
+        return;
+
+    RingBuf_Reset(&stream->rx_fifo);
+    Stream_TxReset(stream);
+}
+
+void Stream_TxReset(stream_t *stream)
+{
+    if(stream_is_valid(stream) == 0u)
+        return;
+
+    RingBuf_Reset(&stream->tx_fifo);
+    stream->tx_state = CHAR_STREAM_TX_IDLE;
+    stream->tx_done_pending = 0u;
+}
+
+uint16_t Stream_Read(stream_t *stream, uint8_t *buffer, uint16_t size)
+{
+    if(stream_is_valid(stream) == 0u)
+        return 0u;
+
+    return RingBuf_Pop(&stream->rx_fifo, buffer, size);
+}
+
+uint16_t Stream_RxPeek(const stream_t *stream, uint8_t *buffer, uint16_t size)
+{
+    if(stream_is_valid(stream) == 0u)
+        return 0u;
+
+    return RingBuf_Peek(&stream->rx_fifo, buffer, size);
+}
+
+uint16_t Stream_RxWrite(stream_t *stream, const uint8_t *buffer, uint16_t size)
+{
+    uint16_t accepted;
+
+    if(stream_is_valid(stream) == 0u)
+        return 0u;
+
+    accepted = RingBuf_Push(&stream->rx_fifo, buffer, size);
+
+    if(accepted < size)
+        stream_drop_add(&stream->rx_drop, (uint16_t)(size - accepted));
+
+    return accepted;
+}
+
+uint16_t Stream_Write(stream_t *stream, const uint8_t *buffer, uint16_t size)
+{
+    uint16_t accepted;
+
+    if(stream_is_valid(stream) == 0u)
+        return 0u;
+
+    accepted = RingBuf_Push(&stream->tx_fifo, buffer, size);
+
+    if(accepted < size)
+        stream_drop_add(&stream->tx_drop, (uint16_t)(size - accepted));
+
+    Stream_TxPump(stream);
+    return accepted;
+}
+
+uint16_t Stream_RxCount(const stream_t *stream)
+{
+    return (stream_is_valid(stream) != 0u) ? RingBuf_Count(&stream->rx_fifo) : 0u;
+}
+
+uint16_t Stream_RxSpace(const stream_t *stream)
+{
+    return (stream_is_valid(stream) != 0u) ? RingBuf_Space(&stream->rx_fifo) : 0u;
+}
+
+uint16_t Stream_TxSpace(const stream_t *stream)
+{
+    return (stream_is_valid(stream) != 0u) ? RingBuf_Space(&stream->tx_fifo) : 0u;
+}
+
+int Stream_TxSubmitLimitSet(stream_t *stream, uint16_t limit)
+{
+    if((stream_is_valid(stream) == 0u) || (limit == 0u))
+        return CHAR_DEV_ERR_PARAM;
+
+    stream->tx_submit_limit = (limit < stream->tx_stage_capacity) ? limit : stream->tx_stage_capacity;
+    return CHAR_DEV_OK;
+}
+
+void Stream_TxPump(stream_t *stream)
+{
+    uint16_t available;
+    uint16_t limit;
+    uint16_t length;
+    int result;
+
+    if(stream_is_valid(stream) == 0u)
+        return;
+
+    while(stream->tx_state == CHAR_STREAM_TX_IDLE)
+    {
+        available = RingBuf_Count(&stream->tx_fifo);
+
+        if(available == 0u)
+            return;
+
+        limit = stream->tx_submit_limit;
+
+        if((limit == 0u) || (limit > stream->tx_stage_capacity))
+            limit = stream->tx_stage_capacity;
+
+        length = (available < limit) ? available : limit;
+
+        if(RingBuf_Peek(&stream->tx_fifo, stream->tx_stage, length) != length)
+            return;
+
+        stream->tx_done_pending = 0u;
+        stream->tx_state = CHAR_STREAM_TX_SUBMITTING;
+        result = stream->submit(stream->submit_context, stream->tx_stage, length);
+
+        if(result != CHAR_DEV_OK)
+        {
+            stream->tx_state = CHAR_STREAM_TX_IDLE;
+            return;
+        }
+
+        (void)RingBuf_Discard(&stream->tx_fifo, length);
+
+        if(stream->tx_done_pending == 0u)
+        {
+            stream->tx_state = CHAR_STREAM_TX_IN_FLIGHT;
+            return;
+        }
+
+        stream->tx_done_pending = 0u;
+        stream->tx_state = CHAR_STREAM_TX_IDLE;
+    }
+}
+
+int Stream_TxComplete(stream_t *stream)
+{
+    if(stream_is_valid(stream) == 0u)
+        return CHAR_DEV_ERR_PARAM;
+
+    if(stream->tx_state == CHAR_STREAM_TX_SUBMITTING)
+    {
+        stream->tx_done_pending = 1u;
+        return CHAR_DEV_OK;
+    }
+
+    if(stream->tx_state != CHAR_STREAM_TX_IN_FLIGHT)
+        return CHAR_DEV_ERR_STATE;
+
+    stream->tx_state = CHAR_STREAM_TX_IDLE;
+    return CHAR_DEV_OK;
+}

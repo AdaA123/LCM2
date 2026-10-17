@@ -1,0 +1,36 @@
+#ifndef UART_H
+#define UART_H
+
+#include <stdint.h>
+#include "core.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+#include "type.h"
+enum uart_device_control 
+{
+    UART_DEV_IOC_RX_COUNT = 1,
+    UART_DEV_IOC_TX_SPACE,
+    UART_DEV_IOC_RX_DROP_COUNT,
+    UART_DEV_IOC_TX_DROP_COUNT
+};
+
+void Uart_Init(void);
+Int16 Uart_Register(void);
+device_t *Uart_Device(void);
+Int16 Uart_IrqStart(void);
+void Uart_DeInit(void);
+Int16 Uart_TaskStart(void);
+void Uart_TaskStop(void);
+void Log_Init(void);
+Int16 Log_BindDevice(device_t *device);
+void Log_UnbindDevice(void);
+Int16 Log_Write(const uint8_t *data, uint16_t length);
+UInt32 Log_GetDropCount(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* UART_H */

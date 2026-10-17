@@ -1,0 +1,574 @@
+#include "uart.h"
+#include "stream.h"
+#include "n32wb033.h"
+#include "n32wb033_rcc.h"
+#include "n32wb033_gpio.h"
+#include "n32wb033_lpuart.h"
+#include "misc.h"
+#include "global_func.h"
+#include "proto.h"
+#include "led.h"
+#include "update.h"
+#include "my_ble.h"
+#include "Mytask.h"
+
+#define UART2                         LPUART2
+#define UART2_CLOCK                   RCC_LPUART2CLK
+#define UART2_GPIO                    GPIOC
+#define UART2_GPIO_CLOCK              RCC_APB2_PERIPH_GPIOC
+#define UART2_TX_PIN                  GPIO_PIN_3
+#define UART2_RX_PIN                  GPIO_PIN_4
+#define UART2_TX_GPIO_AF              GPIO_AF1
+#define UART2_RX_GPIO_AF              GPIO_AF1
+
+#define UART_RX_BUFFER_SIZE           513u
+#define UART_TX_BUFFER_SIZE           4097u
+#define UART_TX_STAGE_SIZE            288u
+#define UART_RX_ISR_BUDGET            32u
+#define UART_TASK_PERIOD_MS           5u
+#define UART_TASK_READ_BUDGET         4u
+
+#define LOG_LINE_BUFFER_SIZE 128u
+
+typedef struct
+{
+    device_t device;
+    stream_t stream;
+    Byte       rx_storage[UART_RX_BUFFER_SIZE];
+    Byte       tx_storage[UART_TX_BUFFER_SIZE];
+    Byte       tx_stage[UART_TX_STAGE_SIZE];
+    const Byte *tx_pointer;
+    UInt16      tx_length;
+    UInt16      tx_index;
+    Byte       hardware_ready;
+    Byte       irq_started;
+} uart_device_context_t;
+
+static uart_device_context_t s_uart2;
+
+static int uart_dev_init(struct device *device);
+static int uart_dev_open(struct device *device, UInt16 open_flag);
+static int uart_dev_close(struct device *device);
+static int uart_dev_read(struct device *device, UInt32 position, void *buffer, UInt32 size);
+static int uart_dev_write(struct device *device, UInt32 position, const void *buffer, UInt32 size);
+static int uart_dev_control(struct device *device, int command, void *argument);
+static int uart_submit(void *context, const Byte *data, uint16_t length);
+void LPUART2_IRQHandler(void);
+
+static const ops_t s_uart_ops =
+{
+    uart_dev_init,
+    uart_dev_open,
+    uart_dev_close,
+    uart_dev_read,
+    uart_dev_write,
+    uart_dev_control
+};
+
+static void uart_hardware_init(uart_device_context_t *uart)
+{
+    GPIO_InitType gpio;
+    LPUART_InitType config;
+    NVIC_DisableIRQ(LPUART2_IRQn);
+    NVIC_ClearPendingIRQ(LPUART2_IRQn);
+    RCC_ConfigLpuartClk(UART2_CLOCK, RCC_LPUARTCLK_SRC_APB1);
+    RCC_EnableLpuartClk(UART2_CLOCK, ENABLE);
+    RCC_EnableAPB2PeriphClk(UART2_GPIO_CLOCK | RCC_APB2_PERIPH_AFIO,
+                            ENABLE);
+    GPIO_InitStruct(&gpio);
+    gpio.GPIO_Mode = GPIO_MODE_AF_PP;
+    gpio.GPIO_Pull = GPIO_PULL_UP;
+    gpio.Pin = UART2_TX_PIN;
+    gpio.GPIO_Alternate = UART2_TX_GPIO_AF;
+    GPIO_InitPeripheral(UART2_GPIO, &gpio);
+    gpio.Pin = UART2_RX_PIN;
+    gpio.GPIO_Alternate = UART2_RX_GPIO_AF;
+    GPIO_InitPeripheral(UART2_GPIO, &gpio);
+    LPUART_DeInit(UART2);
+    LPUART_StructInit(&config);
+    config.BaudRate = 115200u;
+    config.Parity = LPUART_PE_NO;
+    config.RtsThreshold = LPUART_RTSTH_FIFOFU;
+    config.HardwareFlowControl = LPUART_HFCTRL_NONE;
+    config.Mode = LPUART_MODE_TX | LPUART_MODE_RX;
+    LPUART_Init(UART2, &config);
+    LPUART_ConfigInt(UART2, LPUART_INT_TXC, DISABLE);
+    LPUART_ConfigInt(UART2, LPUART_INT_FIFO_NE, DISABLE);
+    LPUART_ClrFlag(UART2, LPUART_FLAG_TXC);
+    LPUART_ClrFlag(UART2, LPUART_FLAG_PEF);
+    uart->tx_pointer = 0;
+    uart->tx_length = 0u;
+    uart->tx_index = 0u;
+    uart->irq_started = 0u;
+    uart->hardware_ready = 1u;
+}
+
+static int uart_submit(void *context, const Byte *data, uint16_t length)
+{
+    uart_device_context_t *uart = (uart_device_context_t *)context;
+
+    if ((uart != &s_uart2) || (data == 0) || (length == 0u))
+        return CHAR_DEV_ERR_PARAM;
+
+    if ((uart->hardware_ready == 0u) || (uart->irq_started == 0u) || (uart->tx_pointer != 0))
+        return CHAR_DEV_ERR_BUSY;
+
+    uart->tx_pointer = data;
+    uart->tx_length = length;
+    uart->tx_index = 1u;
+    LPUART_ClrFlag(UART2, LPUART_FLAG_TXC);
+    LPUART_SendData(UART2, data[0]);
+    LPUART_ConfigInt(UART2, LPUART_INT_TXC, ENABLE);
+    return CHAR_DEV_OK;
+}
+
+Int16 Uart_Register(void)
+{
+    Int16 result;
+
+    if ((s_uart2.device.state >= CHAR_DEV_STATE_REGISTERED) && (s_uart2.device.state <= CHAR_DEV_STATE_OPEN))
+    {
+        if ((s_uart2.device.ops != &s_uart_ops) || (s_uart2.device.user_data != &s_uart2))
+            return CHAR_DEV_ERR_STATE;
+
+        return CHAR_DEV_OK;
+    }
+
+    if ((s_uart2.device.state != CHAR_DEV_STATE_UNREGISTERED) && (s_uart2.device.state != CHAR_DEV_STATE_ERROR))
+        return CHAR_DEV_ERR_STATE;
+
+    result = Stream_Init(&s_uart2.stream, s_uart2.rx_storage, (UInt16)sizeof(s_uart2.rx_storage), s_uart2.tx_storage, (UInt16)sizeof(s_uart2.tx_storage), s_uart2.tx_stage, (UInt16)sizeof(s_uart2.tx_stage), uart_submit, &s_uart2);
+
+    if (result != CHAR_DEV_OK)
+        return result;
+
+    return Register(&s_uart2.device, &s_uart_ops, &s_uart2);
+}
+
+device_t *Uart_Device(void)
+{
+    return &s_uart2.device;
+}
+
+static void uart_task(void)
+{
+    static Byte frame[PROTO_FRAME_MAX];
+    device_t *device = Uart_Device();
+    Byte upgrade_active = FirmwareUpdate_IsActive();
+    Byte reads;
+    Int16 result;
+
+    for (reads = 0u; reads < UART_TASK_READ_BUDGET; reads++)
+    {
+        result = read(device, 0u, frame, sizeof(frame));
+
+        if (result <= 0)
+            break;
+
+        Led_ActivityNotify();
+        Proto_UartRxCallback(PROTO_PORT_UART2, frame, (UInt16)result);
+    }
+
+    Proto_UartRxCallback(PROTO_PORT_UART2, 0, 0u);
+
+    if (upgrade_active != FirmwareUpdate_IsActive())
+        My_Ble_ProcessRequest();
+}
+
+Int16 Uart_TaskStart(void)
+{
+    device_t *device = Uart_Device();
+
+    if ((device == 0) || (device->state != CHAR_DEV_STATE_OPEN))
+        return CHAR_DEV_ERR_STATE;
+
+    if (Proto_BindPort(PROTO_PORT_UART2, device) != 0)
+        return CHAR_DEV_ERR_STATE;
+
+    if ((TaskFind(uart_task) == 0xFFFFu) &&
+        (TaskAdd(UART_TASK_PERIOD_MS, uart_task) == 0u))
+        return CHAR_DEV_ERR_BUSY;
+
+    return CHAR_DEV_OK;
+}
+
+void Uart_TaskStop(void)
+{
+    (void)TaskDelete(uart_task);
+}
+
+Int16 Uart_IrqStart(void)
+{
+    NVIC_InitType interrupt_config;
+    UInt32 interrupt_state;
+
+    if ((s_uart2.hardware_ready == 0u) || (s_uart2.device.state != CHAR_DEV_STATE_OPEN))
+        return CHAR_DEV_ERR_STATE;
+
+    if (s_uart2.irq_started != 0u)
+        return CHAR_DEV_OK;
+
+    LPUART_ConfigInt(UART2, LPUART_INT_TXC, DISABLE);
+    LPUART_ConfigInt(UART2, LPUART_INT_FIFO_NE, DISABLE);
+    LPUART_ClrFlag(UART2, LPUART_FLAG_TXC);
+    LPUART_ClrFlag(UART2, LPUART_FLAG_PEF);
+    ModuleIrqRegister(LPUART2_IRQn, LPUART2_IRQHandler);
+    NVIC_ClearPendingIRQ(LPUART2_IRQn);
+    interrupt_config.NVIC_IRQChannel = LPUART2_IRQn;
+    interrupt_config.NVIC_IRQChannelPriority = 2u;
+    interrupt_config.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&interrupt_config);
+    s_uart2.irq_started = 1u;
+    LPUART_ConfigInt(UART2, LPUART_INT_FIFO_NE, ENABLE);
+    interrupt_state = __get_PRIMASK();
+    __set_PRIMASK(1u);
+    Stream_TxPump(&s_uart2.stream);
+    __set_PRIMASK(interrupt_state);
+    return CHAR_DEV_OK;
+}
+
+void Uart_DeInit(void)
+{
+    Uart_TaskStop();
+    s_uart2.irq_started = 0u;
+
+    if (s_uart2.hardware_ready != 0u)
+    {
+        LPUART_ConfigInt(UART2, LPUART_INT_TXC, DISABLE);
+        LPUART_ConfigInt(UART2, LPUART_INT_FIFO_NE, DISABLE);
+        NVIC_ClearPendingIRQ(LPUART2_IRQn);
+        NVIC_DisableIRQ(LPUART2_IRQn);
+        LPUART_DeInit(UART2);
+    }
+
+    s_uart2.hardware_ready = 0u;
+    s_uart2.tx_pointer = 0;
+    s_uart2.tx_length = 0u;
+    s_uart2.tx_index = 0u;
+    Stream_Reset(&s_uart2.stream);
+}
+
+static int uart_dev_init(struct device *device)
+{
+    if (device != &s_uart2.device)
+        return CHAR_DEV_ERR_PARAM;
+
+    Stream_Reset(&s_uart2.stream);
+    uart_hardware_init(&s_uart2);
+    return CHAR_DEV_OK;
+}
+
+static int uart_dev_open(struct device *device, UInt16 open_flag)
+{
+    (void)open_flag;
+
+    if (device != &s_uart2.device)
+        return CHAR_DEV_ERR_PARAM;
+
+    if (s_uart2.hardware_ready == 0u)
+        uart_hardware_init(&s_uart2);
+
+    return CHAR_DEV_OK;
+}
+
+static int uart_dev_close(struct device *device)
+{
+    if (device != &s_uart2.device)
+        return CHAR_DEV_ERR_PARAM;
+
+    Uart_DeInit();
+    return CHAR_DEV_OK;
+}
+
+static int uart_dev_read(struct device *device, UInt32 position,
+                         void *buffer, UInt32 size)
+{
+    UInt16 requested;
+    (void)position;
+
+    if ((device != &s_uart2.device) || ((buffer == 0) && (size != 0u)))
+        return CHAR_DEV_ERR_PARAM;
+
+    requested = (size > 0xFFFFu) ? 0xFFFFu : (UInt16)size;
+    return (int)Stream_Read(&s_uart2.stream, (Byte *)buffer,
+                            requested);
+}
+
+static int uart_dev_write(struct device *device, UInt32 position,
+                          const void *buffer, UInt32 size)
+{
+    UInt32 interrupt_state;
+    UInt16 requested;
+    UInt16 written;
+    (void)position;
+
+    if ((device != &s_uart2.device) || (buffer == 0) || (size == 0u) || (size > 0xFFFFu))
+        return CHAR_DEV_ERR_PARAM;
+
+    requested = (UInt16)size;
+    interrupt_state = __get_PRIMASK();
+    __set_PRIMASK(1u);
+
+    if (Stream_TxSpace(&s_uart2.stream) < requested)
+    {
+        __set_PRIMASK(interrupt_state);
+        return CHAR_DEV_ERR_BUSY;
+    }
+
+    written = Stream_Write(&s_uart2.stream, (const Byte *)buffer, requested);
+    __set_PRIMASK(interrupt_state);
+    return (written == requested) ? (int)written : CHAR_DEV_ERR_BUSY;
+}
+
+static int uart_dev_control(struct device *device, int command, void *argument)
+{
+    if ((device != &s_uart2.device) || (argument == 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    switch (command)
+    {
+        case UART_DEV_IOC_RX_COUNT:
+            *(UInt16 *)argument = Stream_RxCount(&s_uart2.stream);
+            return CHAR_DEV_OK;
+
+        case UART_DEV_IOC_TX_SPACE:
+            *(UInt16 *)argument = Stream_TxSpace(&s_uart2.stream);
+            return CHAR_DEV_OK;
+
+        case UART_DEV_IOC_RX_DROP_COUNT:
+            *(UInt32 *)argument = s_uart2.stream.rx_drop;
+            return CHAR_DEV_OK;
+
+        case UART_DEV_IOC_TX_DROP_COUNT:
+            *(UInt32 *)argument = s_uart2.stream.tx_drop;
+            return CHAR_DEV_OK;
+
+        default:
+            return CHAR_DEV_ERR_PARAM;
+    }
+}
+
+static Int16 uart_ble_event(my_ble_event_t event)
+{
+    if (event == MY_BLE_EVENT_INIT_CHECK)
+    {
+        device_t *device = Uart_Device();
+        if ((device == 0) || (device->state != CHAR_DEV_STATE_OPEN))
+        {
+            NS_LOG_ERROR("[UART] initialization failed\r\n");
+            return CHAR_DEV_ERR_STATE;
+        }
+    }
+    else if (event == MY_BLE_EVENT_READY)
+    {
+        Int16 result = Uart_TaskStart();
+        if (result != CHAR_DEV_OK)
+            return result;
+        (void)Uart_IrqStart();
+    }
+    else if (event == MY_BLE_EVENT_ERROR)
+        Uart_TaskStop();
+    return CHAR_DEV_OK;
+}
+
+void Uart_Init(void)
+{
+    device_t *uart_device;
+    Int16 uart_result;
+
+    (void)My_Ble_EventSubscribe(uart_ble_event, 0u);
+    Log_Init();
+    uart_device = Uart_Device();
+    uart_result = Uart_Register();
+
+    if ((uart_result == CHAR_DEV_OK) && (uart_device->state == CHAR_DEV_STATE_REGISTERED))
+        uart_result = init(uart_device);
+
+    if ((uart_result == CHAR_DEV_OK) && (uart_device->state == CHAR_DEV_STATE_INITIALIZED))
+        uart_result = open(uart_device, CHAR_DEV_OFLAG_RDWR);
+
+    if ((uart_result == CHAR_DEV_OK) && (uart_device->state == CHAR_DEV_STATE_OPEN))
+        (void)Log_BindDevice(uart_device);
+
+    NS_LOG_INFO("[SYS_BOOT] === System Power On: Ble 2 OneLine ===\r\n");
+}
+
+void LPUART2_IRQHandler(void)
+{
+    Byte received[UART_RX_ISR_BUDGET];
+    UInt16 received_length = 0u;
+
+    while ((received_length < UART_RX_ISR_BUDGET) && (LPUART_GetFlagStatus(UART2, LPUART_FLAG_FIFO_NE) != RESET))
+        received[received_length++] = LPUART_ReceiveData(UART2);
+
+    if (received_length != 0u)
+    {
+        UInt16 accepted = Stream_RxWrite(&s_uart2.stream, received, received_length);
+
+        if (accepted != 0u)
+            (void)rx_indicate(&s_uart2.device, accepted);
+    }
+
+    if (LPUART_GetIntStatus(UART2, LPUART_INT_TXC) != RESET)
+    {
+        LPUART_ClrFlag(UART2, LPUART_FLAG_TXC);
+
+        if ((s_uart2.tx_pointer != 0) && (s_uart2.tx_index < s_uart2.tx_length))
+            LPUART_SendData(UART2, s_uart2.tx_pointer[s_uart2.tx_index++]);
+        else if (s_uart2.tx_pointer != 0)
+        {
+            const void *completed_buffer = s_uart2.tx_pointer;
+            s_uart2.tx_pointer = 0;
+            s_uart2.tx_length = 0u;
+            s_uart2.tx_index = 0u;
+            LPUART_ConfigInt(UART2, LPUART_INT_TXC, DISABLE);
+
+            if (Stream_TxComplete(&s_uart2.stream) == CHAR_DEV_OK)
+            {
+                (void)tx_complete(&s_uart2.device, completed_buffer);
+                Stream_TxPump(&s_uart2.stream);
+            }
+        }
+        else
+            LPUART_ConfigInt(UART2, LPUART_INT_TXC, DISABLE);
+    }
+
+    if (LPUART_GetFlagStatus(UART2, LPUART_FLAG_PEF) != RESET)
+        LPUART_ClrFlag(UART2, LPUART_FLAG_PEF);
+
+    if (LPUART_GetFlagStatus(UART2, LPUART_FLAG_FIFO_OV) != RESET)
+        LPUART_ClrFlag(UART2, LPUART_FLAG_FIFO_OV);
+}
+
+
+
+typedef struct
+{
+    device_t *device;
+    UInt32       drop_count;
+    Byte        line_buffer[LOG_LINE_BUFFER_SIZE];
+    UInt16       line_length;
+} log_context_t;
+
+static log_context_t s_log;
+
+static void log_drop_add(UInt16 length)
+{
+    if (s_log.drop_count > (0xFFFFFFFFu - (UInt32)length))
+        s_log.drop_count = 0xFFFFFFFFu;
+    else
+        s_log.drop_count += length;
+}
+
+static void log_line_flush(void)
+{
+    UInt16 length;
+    length = s_log.line_length;
+    s_log.line_length = 0u;
+
+    if (length == 0u)
+        return;
+
+    if (length > LOG_LINE_BUFFER_SIZE)
+    {
+        log_drop_add(length);
+        return;
+    }
+
+    (void)Log_Write(s_log.line_buffer, length);
+}
+
+void Log_Init(void)
+{
+    s_log.device = 0;
+    s_log.drop_count = 0u;
+    s_log.line_length = 0u;
+}
+
+Int16 Log_BindDevice(device_t *device)
+{
+    if (device == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    if ((s_log.device != device) && (s_log.line_length != 0u))
+    {
+        log_drop_add(s_log.line_length);
+        s_log.line_length = 0u;
+    }
+
+    s_log.device = device;
+    return CHAR_DEV_OK;
+}
+
+void Log_UnbindDevice(void)
+{
+    if (s_log.line_length != 0u)
+    {
+        log_drop_add(s_log.line_length);
+        s_log.line_length = 0u;
+    }
+
+    s_log.device = 0;
+}
+
+Int16 Log_Write(const Byte *data, UInt16 length)
+{
+    Int16 written;
+
+    if ((data == 0) || (length == 0u))
+        return CHAR_DEV_OK;
+
+    if (s_log.device == 0)
+    {
+        log_drop_add(length);
+        return CHAR_DEV_ERR_STATE;
+    }
+
+    written = write(s_log.device, 0u, data, length);
+
+    if (written != (int)length)
+    {
+        log_drop_add(length);
+        return CHAR_DEV_ERR_BUSY;
+    }
+
+    return CHAR_DEV_OK;
+}
+
+UInt32 Log_GetDropCount(void)
+{
+    return s_log.drop_count;
+}
+
+int fputc(int ch, FILE *stream)
+{
+    UInt32 interrupt_state;
+    Byte value;
+    (void)stream;
+    value = (Byte)ch;
+    interrupt_state = __get_PRIMASK();
+    __set_PRIMASK(1u);
+
+    if (__get_IPSR() != 0u)
+    {
+        log_drop_add(1u);
+        __set_PRIMASK(interrupt_state);
+        return ch;
+    }
+
+    if (s_log.line_length >= LOG_LINE_BUFFER_SIZE)
+    {
+        log_drop_add(s_log.line_length);
+        s_log.line_length = 0u;
+    }
+
+    s_log.line_buffer[s_log.line_length] = value;
+    ++s_log.line_length;
+
+    if ((value == (Byte)'\n') ||
+        (s_log.line_length >= LOG_LINE_BUFFER_SIZE))
+        log_line_flush();
+
+    __set_PRIMASK(interrupt_state);
+    return ch;
+}

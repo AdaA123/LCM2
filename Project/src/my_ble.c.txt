@@ -1,0 +1,2786 @@
+//我们自己的蓝牙应用层
+
+#include "my_ble.h"
+#include "proto.h"
+#include "ble_port.h"
+#include "sys_platform.h"
+#include "update.h"
+#include "flash.h"
+#include "global_var.h"
+#include "ns_log.h"
+#include "Mytask.h"
+#include "n32wb033.h"
+#include <string.h>
+#include <stddef.h>
+
+#define BLE_GATEWAY_NAME_STORED_SIZE    24u
+#define BLE_GATEWAY_NAME_CAPACITY       (BLE_GATEWAY_NAME_STORED_SIZE + 1u)              // 本机蓝牙名长度
+#define BLE_GATEWAY_NAME_PREFIX         "LCM2-"
+#define BLE_GATEWAY_LEGACY_DEFAULT_NAME "LCM2-202609100010"
+#define BLE_GATEWAY_NAME_POLICY_AUTO    0xA501u
+#define BLE_GATEWAY_NAME_POLICY_MANUAL  0xA502u
+#define BLE_GATEWAY_UNIQUE_NAME_LENGTH  (sizeof(BLE_GATEWAY_NAME_PREFIX) - 1u + 12u)
+#define BLE_GATEWAY_RELAY_BUDGET        4               	// 单次蓝牙最多连续转发的包数
+#define BLE_GATEWAY_DEFAULT_ADV_MS      100                 // 默认的蓝牙广播间隔
+#define BLE_GATEWAY_DISCOVERY_MS        200                 // 断开或初始化后，延迟开启主机扫描从机的时间
+#define BLE_GATEWAY_WATCHDOG_MS         1000                // 状态机看门狗周期
+#define BLE_GATEWAY_PROCESS_PERIOD_MS   5u                  // 核心业务大循环的触发周期
+#define BLE_GATEWAY_PROCESS_CONTINUE_MS 1u
+#define BLE_GATEWAY_BMS_HEALTH_MS       5000u
+#define BLE_GATEWAY_CONNECT_TIMEOUT_MS  3000u  
+#define BLE_GATEWAY_SESSION_TIMEOUT_MS  60000u
+
+#define BLE_GATEWAY_FALLBACK_WAIT_MS    60000u
+#define BLE_GATEWAY_FALLBACK_TICK_MS    200u
+#define BLE_GATEWAY_FALLBACK_FRESH_MS   5000u
+#define BLE_GATEWAY_FAILURE_NOTIFY_MS   100u
+#define BLE_GATEWAY_CONNECT_DIAG_MS     3000u
+#define BLE_GATEWAY_PEER_CACHE_SIZE     8u
+#define BLE_GATEWAY_PEER_CACHE_TTL_MS   300000u
+#define BLE_GATEWAY_ADDRESS_TYPE_UNKNOWN 0xFFu
+#define BLE_GATEWAY_BMS_POLL_MS         500                 // 主动向 BMS 轮询电池数据(0x11/0x16指令)的周期
+#define BLE_GATEWAY_BMS_NAME_LENGTH     24              	// 从机蓝牙名长度
+#define BLE_GATEWAY_BMS_PREFIX_LENGTH   4               	// 从机蓝牙名前缀匹配长度
+#define BLE_GATEWAY_SELF_MAGIC          0xA55A2027u         // 本机身份信息的Flash校验头
+#define BLE_GATEWAY_IDENTITY_EXT_MAGIC  0x5A27u             // 项目号的校验头
+#define BLE_GATEWAY_TARGET_MAGIC        0xA55A2026u         // 从机信息的Flash校验头
+
+enum ble_gateway_message_id
+{
+    BLE_GATEWAY_MSG_DISCOVERY = 1,  // 触发蓝牙扫描，寻找从机
+    BLE_GATEWAY_MSG_WATCHDOG = 4,   // 状态机看门狗
+    BLE_GATEWAY_MSG_PROCESS,        // 数据吞吐
+    BLE_GATEWAY_MSG_BMS_POLL = 9,   // 定时向从机拿数据
+    BLE_GATEWAY_MSG_BMS_HEALTH = 10, // BMS 配置文件 / 首次接收存活超时
+    BLE_GATEWAY_MSG_CONNECT_TIMEOUT = 11,  // 底层建连超时事件
+    BLE_GATEWAY_MSG_SESSION_TIMEOUT = 12,  // 业务会话总预算超时
+};
+
+
+enum { BLE_GATEWAY_MSG_FALLBACK = 13 };
+
+enum ble_gateway_control_status
+{
+    BLE_GATEWAY_CONTROL_OK,             // 执行成功
+    BLE_GATEWAY_CONTROL_FAILED,         // 执行失败 (参数错误等)
+    BLE_GATEWAY_CONTROL_NOT_CONNECTED = 3, // 查询状态
+    BLE_GATEWAY_CONTROL_CONNECTED,      // 查询已连接状态
+    BLE_GATEWAY_CONTROL_CONNECTING      // 查询正在连接状态
+};
+
+enum ble_gateway_control_command
+{
+    BLE_GATEWAY_CONTROL_QUERY = 1,      // 查询从机连接状态
+    BLE_GATEWAY_CONTROL_BIND_NAME,      // 名字连接
+    BLE_GATEWAY_CONTROL_BIND_ADDRESS    // mac连接
+};
+
+
+typedef enum
+{
+    GATEWAY_TARGET_NONE = 0,        // 无特定目标
+    GATEWAY_TARGET_NAME,            // 按蓝牙名称匹配
+    GATEWAY_TARGET_ADDRESS          // 按 MAC 地址精确匹配
+} gateway_target_type_t;
+
+typedef struct
+{
+    gateway_target_type_t type;     // 传入的目标类型
+    union
+    {
+        struct
+        {
+            const Byte *data;    // 名字字符串指针
+            UInt16       length;  // 名字长度
+        } name;
+        struct
+        {
+            const Byte *mac_msb; // MAC 地址 (大端序/网络序)
+            Byte        address_type; // 地址类型
+        } address;
+    } value;
+} gateway_target_spec_t;
+
+typedef struct
+{
+    char     name[BLE_GATEWAY_NAME_CAPACITY]; // 自身的蓝牙广播名称
+    Byte  mac_msb[6];                      // 自身的 MAC 地址
+    BatteryCodeType project_no;                      // 项目号
+    UInt16 name_policy;                 //系统自动生成默认名称
+} gateway_identity_t;
+
+typedef struct
+{
+    gateway_target_type_t type;         // 绑定策略
+    Byte               address_type; // 地址类型
+    char                  name[32];     // 名字
+    Byte               mac_msb[6];   // MAC
+} gateway_target_cfg_t;
+
+
+typedef struct
+{
+    UInt32 magic;           // 校验头 0xA55A2027
+    char     name[BLE_GATEWAY_NAME_STORED_SIZE];
+    Byte  address_msb[6];
+    BatteryCodeType project_no;
+    UInt16 extension_magic; // 扩展校验头，用于后续 OTA 增加结构体大小时的兼容
+    UInt16 name_policy; /* Occupies the old record tail padding; old fields stay put. */
+} ble_gateway_identity_record_t;
+
+/* The target belongs to System; the local identity stays in BLE_MODEL. */
+typedef FlashTargetType ble_gateway_target_record_t;
+
+// 防止结构体大小超过Flash Sector编译报错
+typedef char ble_gateway_unique_name_fits[(BLE_GATEWAY_UNIQUE_NAME_LENGTH < BLE_GATEWAY_NAME_CAPACITY) ? 1 : -1];
+typedef char ble_gateway_identity_layout_compatible[
+    ((offsetof(ble_gateway_identity_record_t, name) == 4u) &&
+     (offsetof(ble_gateway_identity_record_t, address_msb) == 28u) &&
+     (offsetof(ble_gateway_identity_record_t, project_no) == 34u) &&
+     (offsetof(ble_gateway_identity_record_t, extension_magic) == 36u) &&
+     (offsetof(ble_gateway_identity_record_t, name_policy) == 38u) &&
+     (sizeof(ble_gateway_identity_record_t) == 40u)) ? 1 : -1];
+typedef char ble_gateway_identity_record_fits[(sizeof(ble_gateway_identity_record_t) <= BLE_MODEL_SIZE) ? 1 : -1];
+typedef char ble_gateway_target_record_fits[(sizeof(ble_gateway_target_record_t) <= SYS_DATA_B_SIZE) ? 1 : -1];
+
+
+typedef struct
+{
+    Byte frame[PROTO_FRAME_MAX];
+    Byte phone_pending[PROTO_FRAME_MAX];
+    UInt16 phone_pending_length;
+} gateway_buffers_t;
+
+typedef enum
+{
+    GATEWAY_BMS_DOWN = 0,
+    GATEWAY_BMS_LINKED,
+    GATEWAY_BMS_READY
+} gateway_bms_state_t;
+
+typedef struct
+{
+    Byte valid;          // 标识该信息是否有效
+    char    name[BLE_GATEWAY_BMS_NAME_LENGTH + 1]; // 实际扫到的名字
+    Byte mac_msb[6];     // 实际扫到的 MAC
+    Byte address_type;
+} gateway_bms_peer_info_t;
+
+//记录最近扫到的设备标识
+typedef struct
+{
+    gateway_bms_peer_info_t peer;
+    UInt32 seen_tick;
+} gateway_peer_cache_entry_t;
+
+typedef struct
+{
+    Byte enabled;
+    Byte open;
+    Byte temporary;
+    Byte waiting;
+    Byte returning;
+    Byte disconnect_sent;
+    UInt32 scan_tick;
+    UInt32 random_state;
+    gateway_bms_peer_info_t return_peer;
+} gateway_fallback_t;
+
+
+typedef struct
+{
+    device_t              *phone;       // 主机
+    device_t              *bms;         // 从机
+
+    gateway_identity_t         identity;                    // 网关自身信息
+    gateway_target_cfg_t       target;                      // 期望绑定的 BMS 目标
+    gateway_bms_peer_info_t    bms_peer;                    // 当前实际连接的 BMS 信息
+	gateway_peer_cache_entry_t  peer_cache[BLE_GATEWAY_PEER_CACHE_SIZE]; // RAM 缓存：近期扫描观测到的候选对端设备列表
+
+    Byte                     target_mac_seen;            // 已扫到匹配目标 MAC 的广播包
+    Byte                     target_name_seen;           // 已扫到匹配目标名称的广播包
+    SByte                      target_last_rssi;           // RSSI
+    UInt32                    target_adv_tick;            // 最近一次接收到目标广播包的系统时间戳 (ms)
+
+    UInt32                    connect_started_tick;       // 超时检测时间戳
+    UInt32                    session_started_tick;       // 超时计时时间戳
+    UInt32                    failure_notify_tick;        // 超时通知时间戳
+    Byte                     session_active;             // mtu设置完成
+    Byte                     failure_notify_pending;     // 连接失败状态上报标志
+
+    UInt32                    connect_diag_tick;          // 保活轮询时间戳
+    Byte                     connect_idle_seen;          // 空闲状态标志
+    Byte                     upgrade_connection_paused;  // 升级标志
+    UInt16                   advertising_interval_ms;     // 当前广播间隔
+
+    gateway_buffers_t               buffers;                // 共享数据缓存
+    volatile Byte                phone_link_up;
+    volatile gateway_bms_state_t    bms_state;
+    Byte                        	bms_connection_state; 	// 0x81 对外四态，独立于 GAP/GATT 内部状态
+    Byte                        	bms_connect_pending;  	// 已提交建连，等待成功或 Central idle
+
+    Byte                    target_restart_pending;      // 目标更改生效中，正在重启底层扫描/连接的标志位
+    Byte                    bms_rx_seen;                 // 当前从机已收到数据
+    Byte                    bms_secured;                 // BMS配对/加密已完成（防止SECURED事件重复触发服务发现）
+    Byte                    target_scan_fallback;        // 连不上时连任意规则里的蓝牙
+    Byte                    target_discovery_suspended;
+    gateway_fallback_t fallback;
+
+} gateway_app_t;
+
+
+static gateway_app_t s_gw_dev;
+
+/* Compile-time model numbers are defaults; saved identity owns this business policy. */
+static Byte ble_gateway_fallback_allowed(const gateway_app_t *gateway)
+{
+    return (Byte)((gateway->identity.project_no.HostModel != 65u) &&
+                     (gateway->identity.project_no.SlaveModel != 0u));
+}
+
+/* Manual binding clears enabled until the selected BMS reaches READY. */
+static Byte ble_gateway_fallback_active(const gateway_app_t *gateway)
+{
+    return (Byte)((ble_gateway_fallback_allowed(gateway) != 0u) &&
+                     (gateway->fallback.enabled != 0u) &&
+                     (gateway->target.type != GATEWAY_TARGET_NONE) &&
+                     (gateway->target_discovery_suspended == 0u));
+}
+
+static void ble_gateway_fallback_timer_update(const gateway_app_t *gateway)
+{
+    if (ble_gateway_fallback_active(gateway) != 0u)
+        SysPlatform_TimerSet(BLE_GATEWAY_MSG_FALLBACK, BLE_GATEWAY_FALLBACK_TICK_MS);
+    else
+        SysPlatform_TimerClear(BLE_GATEWAY_MSG_FALLBACK);
+}
+static my_ble_event_handler_t s_app_event_handler;
+
+#define BLE_GATEWAY_EVENT_SUBSCRIBERS 4u
+
+typedef struct
+{
+    my_ble_event_subscriber_t handler;
+    Byte priority;
+} gateway_event_subscriber_t;
+
+/* Kept outside s_gw_dev: peripheral Init calls precede My_Ble_Init. */
+static gateway_event_subscriber_t s_event_subscribers[BLE_GATEWAY_EVENT_SUBSCRIBERS];
+static Byte s_event_subscriber_count;
+static Byte s_event_registration_failed;
+
+Int16 My_Ble_EventSubscribe(my_ble_event_subscriber_t handler, Byte priority)
+{
+    Byte index;
+
+    if (handler == 0)
+        goto invalid_registration;
+    for (index = 0u; index < s_event_subscriber_count; ++index)
+    {
+        if (s_event_subscribers[index].handler == handler)
+        {
+            if (s_event_subscribers[index].priority == priority)
+                return CHAR_DEV_OK;
+            goto invalid_registration;
+        }
+    }
+    if (s_event_subscriber_count >= BLE_GATEWAY_EVENT_SUBSCRIBERS)
+    {
+        s_event_registration_failed = 1u;
+        return CHAR_DEV_ERR_BUSY;
+    }
+    index = s_event_subscriber_count;
+    while ((index > 0u) && (s_event_subscribers[index - 1u].priority > priority))
+    {
+        s_event_subscribers[index] = s_event_subscribers[index - 1u];
+        --index;
+    }
+    s_event_subscribers[index].handler = handler;
+    s_event_subscribers[index].priority = priority;
+    ++s_event_subscriber_count;
+    return CHAR_DEV_OK;
+
+invalid_registration:
+    s_event_registration_failed = 1u;
+    return CHAR_DEV_ERR_PARAM;
+}
+
+static Int16 ble_gateway_app_event_notify(my_ble_event_t event)
+{
+    Byte index;
+    Int16 result = CHAR_DEV_OK;
+
+    for (index = 0u; index < s_event_subscriber_count; ++index)
+    {
+        Int16 current = s_event_subscribers[index].handler(event);
+        if (current != CHAR_DEV_OK)
+        {
+            result = current;
+            /* ERROR is rollback: notify even modules not reached by READY. */
+            if (event != MY_BLE_EVENT_ERROR)
+                break;
+        }
+    }
+    if (((result == CHAR_DEV_OK) || (event == MY_BLE_EVENT_ERROR)) &&
+        (s_app_event_handler != 0))
+        s_app_event_handler(event);
+    return result;
+}
+
+
+void My_Ble_EventHandlerSet(my_ble_event_handler_t handler)
+{
+    s_app_event_handler = handler;
+}
+
+void My_Ble_ProcessRequest(void)
+{
+    SysPlatform_MessagePost(BLE_GATEWAY_MSG_PROCESS);
+}
+
+
+static Byte ble_gateway_bms_linked(const gateway_app_t *gateway)
+{
+    return (Byte)(gateway->bms_state != GATEWAY_BMS_DOWN);
+}
+
+static Byte ble_gateway_bms_ready(const gateway_app_t *gateway)
+{
+    return (Byte)(gateway->bms_state == GATEWAY_BMS_READY);
+}
+
+static void ble_gateway_phone_relay_reset(gateway_app_t *gateway)
+{
+    gateway->buffers.phone_pending_length = 0u;
+}
+
+static void ble_gateway_bms_ready_clear(gateway_app_t *gateway)
+{
+    ble_gateway_phone_relay_reset(gateway);
+    if (gateway->bms_state == GATEWAY_BMS_READY)
+        gateway->bms_state = GATEWAY_BMS_LINKED;
+}
+
+
+static Int16 gateway_target_apply(gateway_app_t *gateway, const gateway_target_spec_t *target); 			//设置连接方式，蓝牙名和mac地址
+static ble_port_status_t ble_gateway_port_status_get(gateway_app_t *gateway);							//获取蓝牙连接的状态
+static ble_endpoint_id_t ble_gateway_endpoint_get(const gateway_app_t *gateway, const device_t *device) //获取蓝牙连接的对象
+{
+    if ((gateway != 0) && (device == gateway->phone))
+        return BLE_ENDPOINT_PHONE;
+
+    if ((gateway != 0) && (device == gateway->bms))
+        return BLE_ENDPOINT_BMS;
+
+    return BLE_ENDPOINT_INVALID;
+}
+
+//从机操作接口
+static Int16 ble_gateway_control(gateway_app_t *gateway, Int16 command, void *argument)
+{
+    device_t *device;
+
+    if (gateway == 0)
+        return CHAR_DEV_ERR_STATE;
+
+    switch (command)
+    {
+        case BLE_DEV_IOC_SCAN_START:
+        case BLE_DEV_IOC_SCAN_MONITOR_START:
+        case BLE_DEV_IOC_SCAN_STOP:
+        case BLE_DEV_IOC_CONNECT:
+        case BLE_DEV_IOC_CONNECT_CANCEL:
+        case BLE_DEV_IOC_GET_STATUS:
+            device = gateway->bms;
+            break;
+
+        default:
+            device = gateway->phone;
+            break;
+    }
+
+    if (device == 0)
+        return CHAR_DEV_ERR_STATE;
+
+    return control(device, command, argument);
+}
+
+//rb剩余可用空间查询
+static UInt16 ble_gateway_u16_query(device_t *device, Int16 command)
+{
+    UInt16 value = 0;
+
+    if (device != 0)
+        control(device, command, &value);
+
+    return value;
+}
+
+//发送
+static Int16 ble_gateway_write_all(device_t *device, const Byte *data, UInt16 length)
+{
+    Int16 written;
+
+    if ((device == 0) || (data == 0) || (length == 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    // 缓冲区是否可用
+    if (ble_gateway_u16_query(device, BLE_DEV_IOC_TX_SPACE) < length)
+        return CHAR_DEV_ERR_BUSY;
+
+    written = write(device, 0, data, length);
+
+    if (written < 0)
+        return written;
+
+    return (written == (int)length) ? CHAR_DEV_OK : CHAR_DEV_ERR_BUSY;
+}
+
+
+//获取长度
+static UInt16 ble_gateway_strnlen(const char *text, UInt16 capacity)
+{
+    UInt16 length = 0;
+
+    if (text == 0)
+        return 0;
+
+    while ((length < capacity) && (text[length] != '\0'))
+        length++;
+
+    return length;
+}
+
+//蓝牙名称合法性检查
+static Byte ble_gateway_name_is_valid(const char *name, UInt16 capacity)
+{
+    UInt16 index;
+    UInt16 length = ble_gateway_strnlen(name, capacity);
+
+    if ((length == 0) || (length >= capacity))
+        return 0;
+
+    for (index = 0; index < length; index++)
+    {
+        Byte value = (Byte)name[index];
+
+        if ((value < 0x20) || (value > 0x7Eu))
+            return 0;  //可见字符
+    }
+
+    return 1;
+}
+
+//MAC 地址合法性检查
+static Byte ble_gateway_bms_name_is_valid(const Byte *name,
+        UInt16 length)
+{
+    UInt16 index;
+
+    if ((name == 0) || (length != BLE_GATEWAY_BMS_NAME_LENGTH))
+        return 0;
+
+    if ((memcmp(name, "01DG", BLE_GATEWAY_BMS_PREFIX_LENGTH) != 0) &&
+        (memcmp(name, "03HM", BLE_GATEWAY_BMS_PREFIX_LENGTH) != 0))
+        return 0;
+
+    for (index = 0; index < length; index++)
+    {
+        if ((name[index] < 0x20) || (name[index] > 0x7Eu))
+            return 0;
+    }
+
+    return 1;
+}
+
+// MAC 地址是否非法
+static Byte ble_gateway_address_is_invalid(const Byte address[6])
+{
+    Byte any_set;
+    Byte all_set;
+
+    if (address == 0)
+        return 1;
+
+    any_set = (Byte)(address[0] | address[1] | address[2] | address[3] | address[4] | address[5]);
+    all_set = (Byte)(address[0] & address[1] & address[2] & address[3] & address[4] & address[5]);
+    return (Byte)((any_set == 0) || (all_set == 0xFFu));
+}
+
+// 广播扫描包正常，更新设备到环境中
+static void ble_gateway_peer_cache_store(gateway_app_t *gateway,
+        const Byte mac[6], Byte address_type,
+        const char *name)
+{
+    Byte index;
+    UInt32 now = TaskGetTick();
+    gateway_peer_cache_entry_t *entry;
+
+    if ((address_type > 1u) || (ble_gateway_address_is_invalid(mac) != 0u) ||
+        (ble_gateway_bms_name_is_valid((const Byte *)name, BLE_GATEWAY_BMS_NAME_LENGTH) == 0u))
+        return;
+
+    for (index = 0u; index < BLE_GATEWAY_PEER_CACHE_SIZE; index++)
+    {
+        entry = &gateway->peer_cache[index];
+
+        if ((entry->peer.valid != 0u) && (entry->peer.address_type == address_type) &&
+            (memcmp(entry->peer.mac_msb, mac, 6u) == 0))
+            break;
+    }
+
+    if (index == BLE_GATEWAY_PEER_CACHE_SIZE)
+        index = BLE_GATEWAY_PEER_CACHE_SIZE - 1u;
+
+    if (index != 0u)
+        memmove(&gateway->peer_cache[1], &gateway->peer_cache[0],
+                (size_t)index * sizeof(gateway->peer_cache[0]));
+
+    entry = &gateway->peer_cache[0];
+    memset(entry, 0, sizeof(*entry));
+    entry->peer.valid = 1u;
+    entry->peer.address_type = address_type;
+    memcpy(entry->peer.mac_msb, mac, 6u);
+    memcpy(entry->peer.name, name, BLE_GATEWAY_BMS_NAME_LENGTH);
+    entry->seen_tick = now;
+}
+
+//1=命中，0=未命中，-1=未指定地址类型的 MAC 存在 Public/Random 身份歧义。
+static Int16 ble_gateway_peer_cache_find(const gateway_app_t *gateway,
+                                       const Byte mac[6], Byte address_type,
+                                       const gateway_bms_peer_info_t **peer)
+{
+    Byte index;
+    UInt32 now = TaskGetTick();
+    *peer = 0;
+
+    for (index = 0u; index < BLE_GATEWAY_PEER_CACHE_SIZE; index++)
+    {
+        const gateway_peer_cache_entry_t *entry = &gateway->peer_cache[index];
+
+        if ((entry->peer.valid == 0u) ||
+            ((UInt32)(now - entry->seen_tick) >= BLE_GATEWAY_PEER_CACHE_TTL_MS) ||
+            (memcmp(entry->peer.mac_msb, mac, 6u) != 0) ||
+            ((address_type != BLE_GATEWAY_ADDRESS_TYPE_UNKNOWN) &&
+             (entry->peer.address_type != address_type)))
+            continue;
+
+        if ((*peer != 0) && ((*peer)->address_type != entry->peer.address_type))
+        {
+            *peer = 0;
+            return -1;
+        }
+
+        *peer = &entry->peer;
+    }
+
+    return (*peer != 0) ? 1 : 0;
+}
+
+// 连接成功必须同时具备有效名称和 MAC，不能只凭 GATT 就绪。
+static Byte ble_gateway_bms_identity_complete(const gateway_app_t *gateway)
+{
+    return (Byte)((gateway != 0) &&
+                     (gateway->bms_peer.valid != 0u) &&
+                     (gateway->bms_peer.address_type <= 1u) &&
+                     (ble_gateway_address_is_invalid(gateway->bms_peer.mac_msb) == 0u) &&
+                     (ble_gateway_bms_name_is_valid((const Byte *)gateway->bms_peer.name, BLE_GATEWAY_BMS_NAME_LENGTH) != 0u));
+}
+
+//MAC 地址端序翻转
+static void ble_gateway_mac_reverse_copy(Byte destination[6], const Byte source[6])
+{
+    Byte index;
+
+    for (index = 0; index < 6u; index++)
+        destination[index] = source[5u - index];
+}
+
+//读默认 MAC 地址
+static Int16 ble_gateway_chip_address_load(Byte address_msb[6])
+{
+    const Byte *address_le = SystemGetMacAddr();
+    Byte index;
+
+    if ((address_msb == 0) || (address_le == 0))
+        return CHAR_DEV_ERR_STATE;
+
+    for (index = 0; index < 6u; index++)
+        address_msb[index] = address_le[5u - index];
+
+    return ble_gateway_address_is_invalid(address_msb) ? CHAR_DEV_ERR_STATE : CHAR_DEV_OK;
+}
+
+// 默认蓝牙名唯一性
+static Int16 ble_gateway_unique_name_make(char name[BLE_GATEWAY_NAME_CAPACITY],
+                                        const Byte factory_mac_msb[6])
+{
+    static const char hex[] = "0123456789ABCDEF";
+    Byte index;
+    Byte offset = (Byte)(sizeof(BLE_GATEWAY_NAME_PREFIX) - 1u);
+
+    if ((name == 0) || ble_gateway_address_is_invalid(factory_mac_msb))
+        return CHAR_DEV_ERR_PARAM;
+
+    memset(name, 0, BLE_GATEWAY_NAME_CAPACITY);
+    memcpy(name, BLE_GATEWAY_NAME_PREFIX, offset);
+
+    for (index = 0; index < 6u; index++)
+    {
+        name[offset++] = hex[factory_mac_msb[index] >> 4];
+        name[offset++] = hex[factory_mac_msb[index] & 0x0Fu];
+    }
+
+    return CHAR_DEV_OK;
+}
+
+//从 Flash 读蓝牙配置
+static Int16 ble_gateway_identity_load(gateway_app_t *gateway)
+{
+    ble_gateway_identity_record_t record;
+    Byte factory_mac_msb[6] = {0};
+    UInt16 saved_policy;
+    char saved_name[BLE_GATEWAY_NAME_CAPACITY] = {0};
+
+    if (gateway == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    memset(&gateway->identity, 0, sizeof(gateway->identity));
+    gateway->identity.name_policy = BLE_GATEWAY_NAME_POLICY_AUTO;
+    gateway->identity.project_no.HostModel = YB_N32W_BLE_002_HOST;
+    gateway->identity.project_no.SlaveModel = YB_N32W_BLE_002_SLAVE;
+    memset(&record, 0, sizeof(record));
+    Flash_Read(BLE_MODEL_ADDRESS, (Byte *)&record, sizeof(record));
+    memcpy(saved_name, record.name, sizeof(record.name));
+
+    if ((record.magic == BLE_GATEWAY_SELF_MAGIC) &&
+        (ble_gateway_name_is_valid(saved_name, sizeof(saved_name)) != 0))
+    {
+        memcpy(gateway->identity.mac_msb, record.address_msb, sizeof(gateway->identity.mac_msb));
+        saved_policy = 0u;
+
+        if (record.extension_magic == BLE_GATEWAY_IDENTITY_EXT_MAGIC)
+        {
+            gateway->identity.project_no = record.project_no;
+            saved_policy = record.name_policy;
+        }
+
+        // 判断是默认蓝牙名还是手动改的蓝牙名
+        if ((saved_policy == BLE_GATEWAY_NAME_POLICY_MANUAL) ||
+            (saved_policy == BLE_GATEWAY_NAME_POLICY_AUTO) ||
+            (strcmp(saved_name, BLE_GATEWAY_LEGACY_DEFAULT_NAME) != 0))
+        {
+            memcpy(gateway->identity.name, saved_name, sizeof(gateway->identity.name));
+            gateway->identity.name_policy = (saved_policy == BLE_GATEWAY_NAME_POLICY_AUTO) ?
+                                            BLE_GATEWAY_NAME_POLICY_AUTO : BLE_GATEWAY_NAME_POLICY_MANUAL;
+        }
+    }
+
+	//判断蓝牙名是否合法，在做flash写入
+    if ((gateway->identity.name[0] == '\0') ||
+        ble_gateway_address_is_invalid(gateway->identity.mac_msb))
+    {
+        if (ble_gateway_chip_address_load(factory_mac_msb) != CHAR_DEV_OK)
+            return CHAR_DEV_ERR_STATE;
+
+        if (ble_gateway_address_is_invalid(gateway->identity.mac_msb))
+            memcpy(gateway->identity.mac_msb, factory_mac_msb, sizeof(factory_mac_msb));
+
+        if (gateway->identity.name[0] == '\0')
+            return ble_gateway_unique_name_make(gateway->identity.name, factory_mac_msb);
+    }
+
+    return CHAR_DEV_OK;
+}
+
+//从 Flash 写蓝牙配置
+static Int16 ble_gateway_identity_save(const gateway_app_t *gateway)
+{
+    ble_gateway_identity_record_t record;
+
+    if ((gateway == 0) || (ble_gateway_name_is_valid(gateway->identity.name, sizeof(gateway->identity.name)) == 0) || (ble_gateway_address_is_invalid(gateway->identity.mac_msb) != 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    memset(&record, 0, sizeof(record));
+    record.magic = BLE_GATEWAY_SELF_MAGIC;
+    memcpy(record.name, gateway->identity.name, sizeof(record.name));
+    memcpy(record.address_msb, gateway->identity.mac_msb, sizeof(record.address_msb));
+    record.project_no = gateway->identity.project_no;
+    record.extension_magic = BLE_GATEWAY_IDENTITY_EXT_MAGIC;
+    record.name_policy = gateway->identity.name_policy;
+
+    if ((Flash_Erase_Sector(BLE_MODEL_ADDRESS) != 0) || (Flash_Write(BLE_MODEL_ADDRESS, (const Byte *)&record, sizeof(record)) != 0) || (memcmp((const void *)BLE_MODEL_ADDRESS, &record, sizeof(record)) != 0))
+        return CHAR_DEV_ERR_STATE;
+
+    return CHAR_DEV_OK;
+}
+//校验 Flash 中的从机绑定记录是否有效
+static Byte ble_gateway_target_record_is_valid(const ble_gateway_target_record_t *record)
+{
+    if ((record == 0) || (record->magic != BLE_GATEWAY_TARGET_MAGIC) || (record->type > GATEWAY_TARGET_ADDRESS))
+        return 0;
+
+    if ((record->type == GATEWAY_TARGET_NAME) && (ble_gateway_bms_name_is_valid((const Byte *)record->name, BLE_GATEWAY_BMS_NAME_LENGTH) == 0))
+        return 0;
+
+    if (record->type == GATEWAY_TARGET_ADDRESS)
+    {
+        if ((record->address_type > 1) && (record->address_type != BLE_GATEWAY_ADDRESS_TYPE_UNKNOWN))
+            return 0;
+
+        if (ble_gateway_address_is_invalid(record->address_le) != 0)
+            return 0;
+    }
+
+    return 1;
+}
+
+//从 Flash 读从机配对绑定关系
+static void ble_gateway_target_load(gateway_app_t *gateway)
+{
+    ble_gateway_target_record_t record;
+    EEPROM_Init();
+    record = System.Target;
+    memset(&gateway->target, 0, sizeof(gateway->target));
+
+    if (ble_gateway_target_record_is_valid(&record) == 0)
+    {
+        memset(&System.Target, 0, sizeof(System.Target));
+        System.Target.magic = BLE_GATEWAY_TARGET_MAGIC;
+        return;
+    }
+
+    gateway->target.type = (gateway_target_type_t)record.type;
+    gateway->target.address_type = record.address_type;
+    memcpy(gateway->target.name, record.name, sizeof(record.name));
+
+    if ((gateway->target.type == GATEWAY_TARGET_ADDRESS) && (ble_gateway_bms_name_is_valid((const Byte *)gateway->target.name, BLE_GATEWAY_BMS_NAME_LENGTH) == 0u))
+    {
+        memset(gateway->target.name, 0, sizeof(gateway->target.name));
+        gateway->target.address_type = BLE_GATEWAY_ADDRESS_TYPE_UNKNOWN;
+    }
+
+    ble_gateway_mac_reverse_copy(gateway->target.mac_msb, record.address_le);
+}
+
+//从 Flash 写从机配对绑定关系
+static Int16 ble_gateway_target_save(const gateway_app_t *gateway)
+{
+    ble_gateway_target_record_t record;
+
+    if ((gateway == 0) || (gateway->target.type > GATEWAY_TARGET_ADDRESS) || ((gateway->target.type == GATEWAY_TARGET_ADDRESS) && (gateway->target.address_type > 1) && (gateway->target.address_type != BLE_GATEWAY_ADDRESS_TYPE_UNKNOWN)))
+        return CHAR_DEV_ERR_PARAM;
+
+    memset(&record, 0, sizeof(record));
+    record.magic = BLE_GATEWAY_TARGET_MAGIC;
+    record.type = (Byte)gateway->target.type;
+    record.address_type = gateway->target.address_type;
+    memcpy(record.name, gateway->target.name, sizeof(record.name));
+    /* Preserve the existing on-Flash LE representation. */
+    ble_gateway_mac_reverse_copy(record.address_le, gateway->target.mac_msb);
+
+    if (ble_gateway_target_record_is_valid(&record) == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    EEPROM_Init();
+    System.Target = record;
+    return EEPROM_Save(0u);
+}
+
+// 延迟写入从机配置
+static Int16 ble_gateway_target_store(void *context)
+{
+    return ble_gateway_target_save((gateway_app_t *)context);
+}
+
+static void ble_gateway_storage_fault(void *context)
+{
+    (void)context;
+    (void)ble_gateway_app_event_notify(MY_BLE_EVENT_STORAGE_ERROR);
+}
+
+//应用蓝牙配置：名称、MAC、广播间隔
+static Int16 ble_gateway_settings_apply(gateway_app_t *gateway)
+{
+    ble_device_settings_t settings;
+
+    if ((gateway == 0) || (gateway->phone == 0))
+        return CHAR_DEV_ERR_STATE;
+
+    settings.name = gateway->identity.name;
+    settings.mac_msb = gateway->identity.mac_msb;
+    settings.advertising_interval_ms = gateway->advertising_interval_ms;
+    return control(gateway->phone, BLE_DEV_IOC_CONFIGURE, &settings);
+}
+
+//延时同步从机配置
+static void ble_gateway_target_commit(gateway_app_t *gateway)
+{
+    (void)gateway;
+    Flash_DeferredSaveRequest(FLASH_DEFERRED_SAVE_DELAY_MS);
+}
+
+/* 再次绑定可恢复已经耗尽的保存重试，不延后仍在进行的保存任务。 */
+static void ble_gateway_target_save_retry_if_exhausted(gateway_app_t *gateway)
+{
+    (void)gateway;
+    Flash_DeferredSaveRetryIfExhausted();
+}
+
+// 连接时检测 MAC 、名称成功才做下一步操作
+static void ble_gateway_target_learn(gateway_app_t *gateway)
+{
+    gateway_target_cfg_t learned;
+    Byte changed;
+    if (gateway->fallback.temporary != 0u)
+        return;
+
+    if (ble_gateway_bms_identity_complete(gateway) == 0u)
+        return;
+
+    memset(&learned, 0, sizeof(learned));
+    learned.type = GATEWAY_TARGET_ADDRESS;
+    learned.address_type = gateway->bms_peer.address_type;
+    memcpy(learned.mac_msb, gateway->bms_peer.mac_msb, sizeof(learned.mac_msb));
+    memcpy(learned.name, gateway->bms_peer.name, BLE_GATEWAY_BMS_NAME_LENGTH);
+    changed = (Byte)((gateway->target.type != learned.type) || (gateway->target.address_type != learned.address_type) || (memcmp(gateway->target.mac_msb, learned.mac_msb, sizeof(learned.mac_msb)) != 0) || (memcmp(gateway->target.name, learned.name, sizeof(learned.name)) != 0));
+    gateway->target = learned;
+    gateway->target_scan_fallback = 0;
+
+    if (changed != 0)
+        ble_gateway_target_commit(gateway);
+}
+
+//停止读从机数据
+static void ble_gateway_bms_poll_stop(void)
+{
+    SysPlatform_TimerClear(BLE_GATEWAY_MSG_BMS_POLL);
+}
+
+static void ble_gateway_connect_timeout_stop(void)
+{
+    SysPlatform_TimerClear(BLE_GATEWAY_MSG_CONNECT_TIMEOUT);
+}
+
+static void ble_gateway_bms_health_stop(void)
+{
+    SysPlatform_TimerClear(BLE_GATEWAY_MSG_BMS_HEALTH);
+}
+
+// 超时计时
+static void ble_gateway_session_begin(gateway_app_t *gateway)
+{
+    gateway->session_started_tick = TaskGetTick();
+    gateway->session_active = 1u;
+    gateway->failure_notify_pending = 0u;
+    gateway->bms_connection_state = PROTO_BMS_CONNECTING;
+    SysPlatform_TimerSet(BLE_GATEWAY_MSG_SESSION_TIMEOUT, BLE_GATEWAY_SESSION_TIMEOUT_MS);
+}
+
+static void ble_gateway_session_stop(gateway_app_t *gateway)
+{
+    gateway->session_active = 0u;
+    SysPlatform_TimerClear(BLE_GATEWAY_MSG_SESSION_TIMEOUT);
+}
+
+static void ble_gateway_failure_notify_process(gateway_app_t *gateway)
+{
+    UInt32 now = TaskGetTick();
+
+    if ((gateway->failure_notify_pending == 0u) || (FirmwareUpdate_IsActive() != 0u) ||
+        ((UInt32)(now - gateway->failure_notify_tick) < BLE_GATEWAY_FAILURE_NOTIFY_MS))
+        return;
+
+    gateway->failure_notify_tick = now;
+
+    if (Proto_TargetConnectionFailedNotify() == CHAR_DEV_OK)
+        gateway->failure_notify_pending = 0u;
+}
+
+// 超时任务
+static void ble_gateway_session_timeout_process(gateway_app_t *gateway)
+{
+    ble_port_status_t status;
+    UInt32 elapsed;
+    Byte linked;
+
+    if (gateway->session_active == 0u)
+        return;
+
+    if (ble_gateway_fallback_active(gateway) != 0u)
+    {
+        if ((UInt32)(TaskGetTick() - gateway->session_started_tick) >= BLE_GATEWAY_SESSION_TIMEOUT_MS)
+        {
+            gateway->session_started_tick = TaskGetTick();
+            SysPlatform_TimerSet(BLE_GATEWAY_MSG_SESSION_TIMEOUT, BLE_GATEWAY_SESSION_TIMEOUT_MS);
+        }
+        return;
+    }
+
+    elapsed = (UInt32)(TaskGetTick() - gateway->session_started_tick);
+
+    if (elapsed < BLE_GATEWAY_SESSION_TIMEOUT_MS)
+        return;
+
+    status = ble_gateway_port_status_get(gateway);
+    linked = (Byte)((status.bms_linked != 0u) || (ble_gateway_bms_linked(gateway) != 0u));
+
+    ble_gateway_session_stop(gateway);
+    gateway->target_discovery_suspended = 1u;
+    gateway->target_restart_pending = 0u;
+    gateway->bms_connect_pending = 0u;
+    gateway->bms_connection_state = PROTO_BMS_CONNECTION_FAILED;
+    gateway->bms_state = GATEWAY_BMS_DOWN;
+	ble_gateway_phone_relay_reset(gateway);
+    gateway->bms_peer.valid = 0u;
+    gateway->bms_rx_seen = 0u;
+    gateway->failure_notify_pending = 1u;
+    gateway->failure_notify_tick = TaskGetTick() - BLE_GATEWAY_FAILURE_NOTIFY_MS;
+    ble_gateway_connect_timeout_stop();
+    ble_gateway_bms_health_stop();
+    ble_gateway_bms_poll_stop();
+    SysPlatform_TimerClear(BLE_GATEWAY_MSG_DISCOVERY);
+    Proto_BmsDataInvalidate();
+    NS_LOG_INFO("[BMS] session timeout t=%lu elapsed=%lu; stopped\r\n",
+                (unsigned long)TaskGetTick(), (unsigned long)elapsed);
+    ble_gateway_app_event_notify(MY_BLE_EVENT_CONNECTION_FAILED);
+
+    if (status.scanning != 0u)
+        (void)ble_gateway_control(gateway, BLE_DEV_IOC_SCAN_STOP, 0);
+
+    if (status.connecting != 0u)
+        (void)ble_gateway_control(gateway, BLE_DEV_IOC_CONNECT_CANCEL, 0);
+
+    if (linked != 0u)
+        (void)control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0);
+}
+
+// 超时重试
+static void ble_gateway_session_retry(gateway_app_t *gateway)
+{
+    if (gateway->session_active == 0u)
+        ble_gateway_session_begin(gateway);
+
+    gateway->bms_connection_state = PROTO_BMS_CONNECTING;
+    gateway->target_restart_pending = 1u;
+}
+
+static Int16 ble_gateway_connect_start(gateway_app_t *gateway, const Byte mac_msb[6], Byte address_type)
+{
+    ble_dev_mac_t target;
+    Int16 result;
+
+    if ((gateway == 0) || (address_type > 1) || (ble_gateway_address_is_invalid(mac_msb) != 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    ble_gateway_session_timeout_process(gateway);
+
+    if (gateway->target_discovery_suspended != 0u)
+        return CHAR_DEV_ERR_STATE;
+
+    if (gateway->session_active == 0u)
+        ble_gateway_session_begin(gateway);
+
+    memcpy(target.mac, mac_msb, sizeof(target.mac));
+    target.addr_type = address_type;
+    result = ble_gateway_control(gateway, BLE_DEV_IOC_CONNECT, &target);
+    gateway->bms_connect_pending = (Byte)(result == CHAR_DEV_OK);
+    gateway->bms_connection_state = PROTO_BMS_CONNECTING;
+
+    if (result == CHAR_DEV_OK)
+    {
+        gateway->connect_started_tick = TaskGetTick();
+        gateway->connect_idle_seen = 0u;
+        SysPlatform_TimerSet(BLE_GATEWAY_MSG_CONNECT_TIMEOUT, BLE_GATEWAY_CONNECT_TIMEOUT_MS);
+    }
+
+    return result;
+}
+
+//换绑或配置变更后，清掉当前动作，重新发起扫描
+static void ble_gateway_target_restart(gateway_app_t *gateway)
+{
+    ble_port_status_t status;
+
+    if (gateway == 0)
+        return;
+
+    memset(&gateway->fallback, 0, sizeof(gateway->fallback));
+    SysPlatform_TimerClear(BLE_GATEWAY_MSG_FALLBACK);
+
+    Proto_TargetRequestReset();
+    gateway->failure_notify_pending = 0u;
+
+    if (gateway->target_discovery_suspended != 0u)
+        ble_gateway_session_stop(gateway);
+    else
+        ble_gateway_session_begin(gateway);
+
+    Proto_BmsDataInvalidate();
+    status = ble_gateway_port_status_get(gateway);
+    ble_gateway_bms_ready_clear(gateway);
+    gateway->target_restart_pending = 1;
+    gateway->target_mac_seen = 0u;
+    gateway->target_name_seen = 0u;
+    gateway->target_last_rssi = 0;
+    gateway->target_adv_tick = 0u;
+    gateway->connect_diag_tick = TaskGetTick();
+    gateway->bms_connect_pending = 0u;
+    gateway->bms_connection_state = (gateway->target_discovery_suspended != 0u) ?
+                                    PROTO_BMS_DISCONNECTED : PROTO_BMS_CONNECTING;
+    ble_gateway_bms_poll_stop();
+    ble_gateway_bms_health_stop();
+    ble_gateway_connect_timeout_stop();
+    gateway->bms_rx_seen = 0;
+    gateway->target_scan_fallback = 0;
+
+    if (status.scanning != 0)
+        ble_gateway_control(gateway, BLE_DEV_IOC_SCAN_STOP, 0);
+
+    if (status.connecting != 0)
+        ble_gateway_control(gateway, BLE_DEV_IOC_CONNECT_CANCEL, 0);
+
+    if (status.bms_linked != 0)
+        control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0);
+
+    SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, BLE_GATEWAY_DISCOVERY_MS);
+}
+
+//解绑从机并恢复初始搜索状态
+static Int16 ble_gateway_target_clear(gateway_app_t *gateway)
+{
+    Int16 result;
+
+    if (gateway == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    gateway->target_discovery_suspended = 1u;
+    memset(gateway->peer_cache, 0, sizeof(gateway->peer_cache));
+    Flash_DeferredSaveCancel();
+    memset(&gateway->target, 0, sizeof(gateway->target));
+    gateway->target.type = GATEWAY_TARGET_NONE;
+    memset(&gateway->bms_peer, 0, sizeof(gateway->bms_peer));
+    ble_gateway_target_restart(gateway);
+    result = ble_gateway_target_save(gateway);
+
+    if (result != CHAR_DEV_OK)
+        Flash_DeferredSaveRequest(FLASH_DEFERRED_SAVE_RETRY_MS);
+
+    return result;
+}
+
+// 同一目标已经可用时，重复绑定只确认成功，不打断数据通道。
+static Byte ble_gateway_bms_can_reuse(const gateway_app_t *gateway)
+{
+    if (gateway->fallback.temporary != 0u)
+        return 0u;
+
+    return (Byte)((gateway->target_discovery_suspended == 0u) &&
+                     (gateway->target_restart_pending == 0u) &&
+                     (gateway->bms_connection_state == PROTO_BMS_CONNECTED) &&
+                     (ble_gateway_bms_ready(gateway) != 0u) &&
+                     (ble_gateway_bms_identity_complete(gateway) != 0u));
+}
+
+//按蓝牙名发起连接
+static Int16 ble_gateway_target_set_name(gateway_app_t *gateway, const Byte *name, UInt16 length)
+{
+    if ((gateway == 0) || (ble_gateway_bms_name_is_valid(name, length) == 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    if ((ble_gateway_bms_can_reuse(gateway) != 0u) &&
+        (memcmp(gateway->bms_peer.name, name, BLE_GATEWAY_BMS_NAME_LENGTH) == 0))
+    {
+        ble_gateway_target_save_retry_if_exhausted(gateway);
+        return CHAR_DEV_OK;
+    }
+
+    gateway->target_discovery_suspended = 0u;
+    memset(&gateway->target, 0, sizeof(gateway->target));
+    memcpy(gateway->target.name, name, length);
+    gateway->target.type = GATEWAY_TARGET_NAME;
+    ble_gateway_target_commit(gateway);
+    ble_gateway_target_restart(gateway);
+    return CHAR_DEV_OK;
+}
+
+//按MAC地址发起连接
+static Int16 ble_gateway_target_set_address(gateway_app_t *gateway, Byte address_type, const Byte address_msb[6])
+{
+    gateway_target_cfg_t target;
+    const gateway_bms_peer_info_t *cached_peer;
+    Int16 cache_result;
+    Byte changed;
+
+    if ((gateway == 0) || ((address_type > 1) && (address_type != BLE_GATEWAY_ADDRESS_TYPE_UNKNOWN)) || (ble_gateway_address_is_invalid(address_msb) != 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    if ((ble_gateway_bms_can_reuse(gateway) != 0u) &&
+        (memcmp(gateway->bms_peer.mac_msb, address_msb, sizeof(gateway->bms_peer.mac_msb)) == 0) &&
+        ((address_type == BLE_GATEWAY_ADDRESS_TYPE_UNKNOWN) ||
+         (address_type == gateway->bms_peer.address_type)))
+    {
+        ble_gateway_target_save_retry_if_exhausted(gateway);
+        return CHAR_DEV_OK;
+    }
+
+    memset(&target, 0, sizeof(target));
+    target.type = GATEWAY_TARGET_ADDRESS;
+    target.address_type = address_type;
+    memcpy(target.mac_msb, address_msb, sizeof(target.mac_msb));
+    cache_result = ble_gateway_peer_cache_find(gateway, address_msb, address_type, &cached_peer);
+
+    if (cache_result > 0)
+    {
+        target.address_type = cached_peer->address_type;
+        memcpy(target.name, cached_peer->name, BLE_GATEWAY_BMS_NAME_LENGTH);
+    }
+    else if ((cache_result == 0) &&
+             (gateway->target.type == GATEWAY_TARGET_ADDRESS) &&
+             (gateway->target.address_type <= 1u) &&
+             ((address_type == BLE_GATEWAY_ADDRESS_TYPE_UNKNOWN) ||
+              (address_type == gateway->target.address_type)) &&
+             (memcmp(gateway->target.mac_msb, address_msb, sizeof(target.mac_msb)) == 0))
+    {
+        target.address_type = gateway->target.address_type;
+        memcpy(target.name, gateway->target.name, sizeof(target.name));
+    }
+
+    NS_LOG_INFO("[BMS] bind MAC t=%lu cache=%d type=%u\r\n",
+                (unsigned long)TaskGetTick(), cache_result, (unsigned)target.address_type);
+    changed = (Byte)((gateway->target.type != target.type) ||
+                        (gateway->target.address_type != target.address_type) ||
+                        (memcmp(gateway->target.mac_msb, target.mac_msb, sizeof(target.mac_msb)) != 0) ||
+                        (memcmp(gateway->target.name, target.name, sizeof(target.name)) != 0));
+    gateway->target_discovery_suspended = 0u;
+    gateway->target = target;
+
+    if (changed != 0u)
+        ble_gateway_target_commit(gateway);
+    else
+        ble_gateway_target_save_retry_if_exhausted(gateway);
+
+    ble_gateway_target_restart(gateway);
+    return CHAR_DEV_OK;
+}
+
+//获取从机的连接状态：广播-》服务-》连接完成
+static Byte ble_gateway_link_status(const gateway_app_t *gateway)
+{
+    if (ble_gateway_bms_linked(gateway) == 0)
+        return BLE_GATEWAY_CONTROL_NOT_CONNECTED;
+
+    return (ble_gateway_bms_ready(gateway) != 0) ? BLE_GATEWAY_CONTROL_CONNECTED : BLE_GATEWAY_CONTROL_CONNECTING;
+}
+
+//主机操作执行结果应答
+static Int16 ble_gateway_control_reply(gateway_app_t *gateway, Byte command, Byte status)
+{
+    ble_control_reply_t reply;
+    reply.command = command;
+    reply.status = status;
+    reply.data = 0;
+    reply.length = 0;
+    return ble_gateway_control(gateway, BLE_DEV_IOC_CONTROL_REPLY, &reply);
+}
+
+//主机操作执行处理函数
+static void ble_gateway_control_process(gateway_app_t *gateway, const Byte *data, UInt16 length)
+{
+    gateway_target_spec_t target;
+    Byte command;
+    Byte status = BLE_GATEWAY_CONTROL_OK;
+
+    if ((gateway == 0) || (data == 0) || (length < 3u))
+        return;
+
+    command = data[2];
+
+    if (FirmwareUpdate_IsActive() != 0) // OTA互斥
+    {
+        ble_gateway_control_reply(gateway, command, BLE_GATEWAY_CONTROL_FAILED);
+        return;
+    }
+
+    switch (command)
+    {
+        case BLE_GATEWAY_CONTROL_QUERY://获取从机连接状态
+            status = ble_gateway_link_status(gateway);
+            break;
+
+        case BLE_GATEWAY_CONTROL_BIND_NAME://通过蓝牙名发起连接
+            if (length < 5u)
+                status = BLE_GATEWAY_CONTROL_FAILED;
+            else
+            {
+                target.type = GATEWAY_TARGET_NAME;
+                target.value.name.data = &data[4];
+                target.value.name.length = data[3];
+
+                if ((length < (UInt16)(4 + data[3])) || (gateway_target_apply(gateway, &target) != CHAR_DEV_OK))
+                    status = BLE_GATEWAY_CONTROL_FAILED;
+            }
+
+            break;
+
+        case BLE_GATEWAY_CONTROL_BIND_ADDRESS://通过MAC发起连接
+            if (length < 10)
+                status = BLE_GATEWAY_CONTROL_FAILED;
+            else
+            {
+                target.type = GATEWAY_TARGET_ADDRESS;
+                target.value.address.mac_msb = &data[4];
+                target.value.address.address_type = data[3];
+
+                if (gateway_target_apply(gateway, &target) != CHAR_DEV_OK)
+                    status = BLE_GATEWAY_CONTROL_FAILED;
+            }
+
+            break;
+
+        default:
+            status = BLE_GATEWAY_CONTROL_FAILED;
+            break;
+    }
+
+    ble_gateway_control_reply(gateway, command, status);
+}
+
+//是否是合法协议
+static Byte ble_gateway_protocol_is_local(const Byte *frame, UInt16 length)
+{
+    if ((frame == 0) || (length < 4) || (frame[0] != PROTO_HEAD1) || (frame[1] != PROTO_HEAD2))
+        return 0;
+
+    return (Byte)((frame[3] == PROTO_CMD_UPDATE) ||
+                     (frame[3] == PROTO_CMD_SET_LOCAL_IDENTITY) ||
+                     (frame[3] == PROTO_CMD_SET_LOCAL_NAME) ||
+                     (frame[3] == PROTO_CMD_SET_LOCAL_MAC) ||
+                     (frame[3] == PROTO_CMD_SET_TARGET));
+}
+
+//是否是合法帧
+static Byte ble_gateway_protocol_is_proxy_command(const Byte *frame, UInt16 length)
+{
+    if ((frame == 0) || (length < 4) || (frame[0] != PROTO_HEAD1) || (frame[1] != PROTO_HEAD2))
+        return 0;
+
+    return (Byte)((frame[3] == PROTO_CMD_X11) || (frame[3] == PROTO_CMD_X16));
+}
+
+static Byte ble_gateway_protocol_is_control(const Byte *frame, UInt16 length)
+{
+    return (Byte)((length >= 4u) && (frame[0] == PROTO_HEAD1) &&
+                     (frame[1] == PROTO_HEAD2) &&
+                     ((frame[2] == BLE_GATEWAY_CONTROL_QUERY) ||
+                      (frame[2] == BLE_GATEWAY_CONTROL_BIND_NAME) ||
+                      (frame[2] == BLE_GATEWAY_CONTROL_BIND_ADDRESS)));
+}
+
+static Byte ble_gateway_phone_head_is_local(device_t *phone)
+{
+    Byte prefix[4];
+    ble_rx_peek_t peek;
+
+    if (Proto_BleLocalRxPending() != 0u)
+        return 1u;
+
+    peek.data = prefix;
+    peek.capacity = sizeof(prefix);
+    peek.length = 0u;
+    if (control(phone, BLE_DEV_IOC_RX_PEEK, &peek) != CHAR_DEV_OK)
+        return 0u;
+
+    /* A split local header must not wait behind BMS TX backpressure. */
+    if ((peek.length > 0u) && (peek.length < sizeof(prefix)) &&
+        (prefix[0] == PROTO_HEAD1) &&
+        ((peek.length < 2u) || (prefix[1] == PROTO_HEAD2)) &&
+        ((peek.length < 3u) || (prefix[2] == 0u)))
+        return 1u;
+
+    return (Byte)((ble_gateway_protocol_is_local(prefix, peek.length) != 0u) ||
+                     (ble_gateway_protocol_is_proxy_command(prefix, peek.length) != 0u) ||
+                     (ble_gateway_protocol_is_control(prefix, peek.length) != 0u));
+}
+
+//核心数据处理函数
+static Byte ble_gateway_relay_process(gateway_app_t *gateway)
+{
+    device_t *phone = gateway->phone;
+    device_t *bms = gateway->bms;
+    Int16 read_result;
+    UInt16 length;
+    Byte chunks;
+
+    //主机
+    for (chunks = 0; chunks < BLE_GATEWAY_RELAY_BUDGET; chunks++)
+    {
+        length = ble_gateway_u16_query(phone, BLE_DEV_IOC_RX_NEXT_SIZE);
+        if (length == 0u)
+            break;
+
+        if (length > sizeof(gateway->buffers.frame))
+            length = sizeof(gateway->buffers.frame);
+
+        if ((ble_gateway_bms_linked(gateway) != 0) &&
+            (ble_gateway_bms_ready(gateway) != 0) &&
+            (ble_gateway_u16_query(bms, BLE_DEV_IOC_TX_SPACE) < length) &&
+            (ble_gateway_phone_head_is_local(phone) == 0u))
+            break;
+
+        read_result = read(phone, 0, gateway->buffers.frame, length);
+
+        if (read_result <= 0)
+            break;
+
+        ble_gateway_app_event_notify(MY_BLE_EVENT_ACTIVITY);
+        length = (UInt16)read_result;
+        if (Proto_PhoneRxCallback(gateway->buffers.frame, length) != 0u)
+            continue;
+
+        if ((ble_gateway_protocol_is_local(gateway->buffers.frame, length) != 0) || (ble_gateway_protocol_is_proxy_command(gateway->buffers.frame, length) != 0))
+            continue;
+
+        if (ble_gateway_protocol_is_control(gateway->buffers.frame, length) != 0u)
+            ble_gateway_control_process(gateway, gateway->buffers.frame, length);
+        else if ((ble_gateway_bms_ready(gateway) != 0) && (ble_gateway_bms_linked(gateway) != 0))
+            ble_gateway_write_all(bms, gateway->buffers.frame, length);
+    }
+
+    //从机
+    if ((FirmwareUpdate_IsActive() != 0u) ||
+        (ble_gateway_bms_ready(gateway) == 0u) || (gateway->phone_link_up == 0u))
+        ble_gateway_phone_relay_reset(gateway);
+
+    for (chunks = 0; chunks < BLE_GATEWAY_RELAY_BUDGET; chunks++)
+    {
+        if (gateway->buffers.phone_pending_length != 0u)
+        {
+            if (ble_gateway_write_all(phone, gateway->buffers.phone_pending,
+                                      gateway->buffers.phone_pending_length) != CHAR_DEV_OK)
+                break;
+            ble_gateway_phone_relay_reset(gateway);
+        }
+
+        length = ble_gateway_u16_query(bms, BLE_DEV_IOC_RX_NEXT_SIZE);
+
+        if (length > sizeof(gateway->buffers.frame))
+            length = sizeof(gateway->buffers.frame);
+
+        read_result = read(bms, 0, gateway->buffers.frame, length);
+
+        if (read_result <= 0)
+            break;
+
+        ble_gateway_app_event_notify(MY_BLE_EVENT_ACTIVITY);
+        length = (UInt16)read_result;
+
+        if (FirmwareUpdate_IsActive() != 0)
+            continue;
+
+        Proto_BleRxCallback(PROTO_PORT_BLE_MASTER, gateway->buffers.frame, length);
+
+        if (ble_gateway_protocol_is_proxy_command(gateway->buffers.frame, length) != 0)
+            continue;
+
+        if ((ble_gateway_bms_ready(gateway) != 0) && (gateway->phone_link_up != 0) &&
+            (ble_gateway_write_all(phone, gateway->buffers.frame, length) != CHAR_DEV_OK))
+        {
+            memcpy(gateway->buffers.phone_pending, gateway->buffers.frame, length);
+            gateway->buffers.phone_pending_length = length;
+            break;
+        }
+    }
+
+    ble_gateway_control(gateway, BLE_DEV_IOC_PROCESS, 0);
+    return (Byte)((gateway->buffers.phone_pending_length != 0u) ||
+                     (ble_gateway_u16_query(phone, BLE_DEV_IOC_RX_COUNT) != 0) ||
+                     (ble_gateway_u16_query(bms, BLE_DEV_IOC_RX_COUNT) != 0));
+}
+
+
+//获取当前蓝牙的状态
+static ble_port_status_t ble_gateway_port_status_get(gateway_app_t *gateway)
+{
+    ble_port_status_t status;
+    memset(&status, 0, sizeof(status));
+
+    if (gateway != 0)
+        ble_gateway_control(gateway, BLE_DEV_IOC_GET_STATUS, &status);
+
+    return status;
+}
+
+void My_Ble_StatusGet(my_ble_status_t *snapshot)
+{
+    ble_port_status_t status;
+
+    if (snapshot == 0)
+        return;
+
+    status = ble_gateway_port_status_get(&s_gw_dev);
+    snapshot->phone_linked = status.phone_linked;
+    snapshot->bms_linked = status.bms_linked;
+    snapshot->bms_ready = ble_gateway_bms_ready(&s_gw_dev);
+    snapshot->connecting = status.connecting;
+    snapshot->advertising = status.advertising;
+    snapshot->scanning = status.scanning;
+}
+
+// 判断时否有升级或者连接，有的话优先执行
+Byte My_Ble_BackgroundBusy(void)
+{
+    gateway_app_t *gateway = &s_gw_dev;
+    ble_port_status_t status = ble_gateway_port_status_get(gateway);
+
+    if (FirmwareUpdate_IsActive() != 0u)
+        return 1u;
+
+    if ((gateway->session_active != 0u) ||
+        ((gateway->target_restart_pending != 0u) &&
+         (gateway->target_discovery_suspended == 0u)) ||
+        (gateway->bms_connect_pending != 0u) || (status.connecting != 0u))
+        return 1u;
+
+    if ((status.bms_linked != 0u) || (ble_gateway_bms_linked(gateway) != 0u))
+        return (Byte)((ble_gateway_bms_ready(gateway) == 0u) ||
+                         (gateway->bms_rx_seen == 0u));
+
+    return (Byte)((gateway->target_discovery_suspended == 0u) &&
+                     (gateway->target.type != GATEWAY_TARGET_NONE));
+}
+
+static void ble_gateway_upgrade_priority_process(gateway_app_t *gateway)
+{
+    if (FirmwareUpdate_IsActive() != 0u)
+    {
+        if (gateway->upgrade_connection_paused == 0u)
+        {
+            ble_port_status_t status = ble_gateway_port_status_get(gateway);
+            gateway->fallback.waiting = 0u;
+			
+            gateway->upgrade_connection_paused = 1u;
+			ble_gateway_phone_relay_reset(gateway);
+            gateway->bms_connect_pending = 0u;
+            ble_gateway_connect_timeout_stop();
+
+            if (status.scanning != 0u)
+                ble_gateway_control(gateway, BLE_DEV_IOC_SCAN_STOP, 0);
+
+            if (status.connecting != 0u)
+                ble_gateway_control(gateway, BLE_DEV_IOC_CONNECT_CANCEL, 0);
+        }
+    }
+    else if (gateway->upgrade_connection_paused != 0u)
+    {
+        gateway->upgrade_connection_paused = 0u;
+
+        if ((gateway->target_discovery_suspended == 0u) &&
+            (ble_gateway_bms_linked(gateway) == 0u))
+            SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, 1u);
+    }
+}
+
+
+// 返回 -1：广播字段损坏；0：未带合法名称；1：取得合法 BMS 名称。
+static Int16 ble_gateway_scan_get_bms(const ble_scan_report_t *report, char name[BLE_GATEWAY_BMS_NAME_LENGTH + 1])
+{
+    UInt16 offset = 0;
+    UInt16 step;
+    Byte name_found = 0u;
+
+    if ((report == 0) || (name == 0) ||
+        ((report->adv_data == 0) && (report->adv_len != 0u)))
+        return -1;
+
+    for (step = 0; (step < report->adv_len) && (offset < report->adv_len); step++)
+    {
+        Byte field_length = report->adv_data[offset];
+        UInt16 field_end;
+        Byte field_type;
+        UInt16 name_length;
+        const Byte *advertised_name;
+
+        if (field_length == 0)
+            break;
+
+        field_end = (UInt16)(offset + 1 + field_length);
+
+        if ((field_length < 1) || (field_end > report->adv_len))
+            return -1;
+
+        field_type = report->adv_data[offset + 1];
+        name_length = (UInt16)(field_length - 1);
+
+        if ((field_type == 0x09u) || (field_type == 0x08u))
+        {
+            advertised_name = &report->adv_data[offset + 2u];
+
+            if ((name_found == 0u) &&
+                (ble_gateway_bms_name_is_valid(advertised_name, name_length) != 0))
+            {
+                memcpy(name, advertised_name, BLE_GATEWAY_BMS_NAME_LENGTH);
+                name[BLE_GATEWAY_BMS_NAME_LENGTH] = '\0';
+                name_found = 1u;
+            }
+        }
+
+        offset = field_end;
+    }
+
+    return name_found;
+}
+
+//连接log
+static void ble_gateway_bms_peer_log(const char *event, const gateway_bms_peer_info_t *peer)
+{
+    if ((event == 0) || (peer == 0) || (peer->valid == 0))
+        return;
+
+    NS_LOG_INFO("[BMS] %s t=%lu: name=%s mac=%02X:%02X:%02X:%02X:%02X:%02X type=%u\r\n",
+                event, (unsigned long)TaskGetTick(), peer->name,
+                (unsigned)peer->mac_msb[0],
+                (unsigned)peer->mac_msb[1],
+                (unsigned)peer->mac_msb[2],
+                (unsigned)peer->mac_msb[3],
+                (unsigned)peer->mac_msb[4],
+                (unsigned)peer->mac_msb[5],
+                (unsigned)peer->address_type);
+}
+
+//广播处理函数
+static Byte ble_gateway_fallback_is_primary(const gateway_app_t *gateway,
+                                              const gateway_bms_peer_info_t *peer)
+{
+    if (gateway->target.type == GATEWAY_TARGET_ADDRESS)
+        return (Byte)(memcmp(peer->mac_msb, gateway->target.mac_msb, 6u) == 0);
+    return (Byte)((gateway->target.type == GATEWAY_TARGET_NAME) &&
+                    (memcmp(peer->name, gateway->target.name, BLE_GATEWAY_BMS_NAME_LENGTH) == 0));
+}
+
+static void ble_gateway_fallback_process(gateway_app_t *gateway)
+{
+    gateway_fallback_t *fallback = &gateway->fallback;
+    ble_port_status_t status;
+    UInt32 now = TaskGetTick();
+    UInt32 random;
+    Byte candidates[BLE_GATEWAY_PEER_CACHE_SIZE];
+    Byte count = 0u;
+    Byte index;
+
+    if (ble_gateway_fallback_active(gateway) == 0u)
+        return;
+    if (FirmwareUpdate_IsActive() != 0u)
+    {
+        fallback->waiting = 0u;
+        return;
+    }
+    status = ble_gateway_port_status_get(gateway);
+    if (fallback->returning != 0u)
+    {
+        if (status.scanning != 0u)
+        {
+            (void)ble_gateway_control(gateway, BLE_DEV_IOC_SCAN_STOP, 0);
+            return;
+        }
+        if ((status.bms_linked != 0u) || (ble_gateway_bms_linked(gateway) != 0u))
+        {
+            if (fallback->disconnect_sent == 0u)
+            {
+                ble_gateway_bms_ready_clear(gateway);
+                ble_gateway_bms_poll_stop();
+                ble_gateway_bms_health_stop();
+                Proto_BmsDataInvalidate();
+                gateway->bms_rx_seen = 0u;
+                ble_gateway_session_begin(gateway);
+                if (control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0) == CHAR_DEV_OK)
+                    fallback->disconnect_sent = 1u;
+            }
+            return;
+        }
+        if ((status.connecting != 0u) || (gateway->bms_connect_pending != 0u))
+        {
+            (void)ble_gateway_control(gateway, BLE_DEV_IOC_CONNECT_CANCEL, 0);
+            return;
+        }
+        gateway->bms_peer = fallback->return_peer;
+        fallback->temporary = 0u;
+        fallback->open = 0u;
+        fallback->waiting = 0u;
+        fallback->returning = 0u;
+        fallback->disconnect_sent = 0u;
+        gateway->target_restart_pending = 0u;
+        gateway->target_scan_fallback = 1u;
+        ble_gateway_bms_peer_log("return to saved target", &gateway->bms_peer);
+        if (ble_gateway_connect_start(gateway, gateway->bms_peer.mac_msb,
+                                      gateway->bms_peer.address_type) != CHAR_DEV_OK)
+        {
+            gateway->bms_peer.valid = 0u;
+            SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, BLE_GATEWAY_DISCOVERY_MS);
+        }
+        return;
+    }
+    if ((status.bms_linked != 0u) || (ble_gateway_bms_linked(gateway) != 0u))
+    {
+        fallback->waiting = 0u;
+        if ((fallback->temporary != 0u) && (ble_gateway_bms_ready(gateway) != 0u) &&
+            (gateway->bms_rx_seen != 0u) && (gateway->target_restart_pending == 0u) &&
+            (status.scanning == 0u) && (status.connecting == 0u))
+            (void)ble_gateway_control(gateway, BLE_DEV_IOC_SCAN_MONITOR_START, 0);
+        return;
+    }
+    if ((gateway->bms_connect_pending != 0u) || (status.connecting != 0u) ||
+        (gateway->target_restart_pending != 0u))
+    {
+        fallback->waiting = 0u;
+        return;
+    }
+    if (status.scanning == 0u)
+    {
+        fallback->waiting = 0u;
+        SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, 1u);
+        return;
+    }
+    if (status.scan_active == 0u)
+    {
+        fallback->waiting = 0u;
+        return;
+    }
+    if (fallback->open == 0u)
+    {
+        if (fallback->waiting == 0u)
+        {
+            fallback->waiting = 1u;
+            fallback->scan_tick = now;
+        }
+        if ((UInt32)(now - fallback->scan_tick) < BLE_GATEWAY_FALLBACK_WAIT_MS)
+            return;
+        fallback->open = 1u;
+        fallback->waiting = 0u;
+        Proto_TargetRequestReset();
+        gateway->failure_notify_pending = 0u;
+        NS_LOG_INFO("[BMS] saved target absent after 60 s scan; temporary peers allowed\r\n");
+    }
+    for (index = 0u; index < BLE_GATEWAY_PEER_CACHE_SIZE; ++index)
+    {
+        const gateway_peer_cache_entry_t *entry = &gateway->peer_cache[index];
+        if ((entry->peer.valid != 0u) && (entry->peer.address_type <= 1u) &&
+            ((UInt32)(now - entry->seen_tick) <= BLE_GATEWAY_FALLBACK_FRESH_MS) &&
+            (ble_gateway_address_is_invalid(entry->peer.mac_msb) == 0u) &&
+            (ble_gateway_bms_name_is_valid((const Byte *)entry->peer.name, BLE_GATEWAY_BMS_NAME_LENGTH) != 0u) &&
+            (ble_gateway_fallback_is_primary(gateway, &entry->peer) == 0u) &&
+            (memcmp(entry->peer.mac_msb, gateway->identity.mac_msb, 6u) != 0))
+            candidates[count++] = index;
+    }
+    if (count == 0u)
+        return;
+    random = fallback->random_state ^ now;
+    for (index = 0u; index < 6u; ++index)
+        random = random * 33u + gateway->identity.mac_msb[index];
+    if (random == 0u)
+        random = 0x6D2B79F5u;
+    random ^= random << 13;
+    random ^= random >> 17;
+    random ^= random << 5;
+    fallback->random_state = random;
+    gateway->bms_peer = gateway->peer_cache[candidates[random % count]].peer;
+    fallback->temporary = 1u;
+    ble_gateway_bms_peer_log("temporary connecting", &gateway->bms_peer);
+    (void)ble_gateway_control(gateway, BLE_DEV_IOC_SCAN_STOP, 0);
+    if (ble_gateway_connect_start(gateway, gateway->bms_peer.mac_msb,
+                                  gateway->bms_peer.address_type) != CHAR_DEV_OK)
+    {
+        gateway->bms_peer.valid = 0u;
+        SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, BLE_GATEWAY_DISCOVERY_MS);
+    }
+}
+
+
+static void ble_gateway_scan_report_process(gateway_app_t *gateway, const ble_scan_report_t *report)
+{
+    ble_port_status_t status;
+    char found_name[BLE_GATEWAY_BMS_NAME_LENGTH + 1];
+    Int16 name_found;
+    Byte matched = 0;
+
+    if ((gateway == 0) || (report == 0) || (report->mac == 0) || (report->addr_type > 1u))
+        return;
+
+    ble_gateway_session_timeout_process(gateway);
+
+    // 停止扫描期间可能还有旧广播回调，不允许覆盖解绑或换绑目标。
+    if ((gateway->target_discovery_suspended != 0u) ||
+        (gateway->target_restart_pending != 0u) || (FirmwareUpdate_IsActive() != 0u))
+        return;
+
+    memset(found_name, 0, sizeof(found_name));
+    name_found = ble_gateway_scan_get_bms(report, found_name);
+
+    if (name_found < 0)
+        return;
+
+    status = ble_gateway_port_status_get(gateway);
+
+    if ((status.scanning == 0u) || (status.connecting != 0u))
+        return;
+    if (gateway->bms_connect_pending != 0u)
+        return;
+    if ((status.bms_linked != 0u) &&
+        ((ble_gateway_fallback_active(gateway) == 0u) || (gateway->fallback.temporary == 0u) ||
+         (ble_gateway_bms_ready(gateway) == 0u) || (gateway->bms_rx_seen == 0u)))
+        return;
+
+    if (name_found != 0)
+        ble_gateway_peer_cache_store(gateway, report->mac, report->addr_type, found_name);
+
+    if ((gateway->target.type == GATEWAY_TARGET_ADDRESS) &&
+        (memcmp(report->mac, gateway->target.mac_msb, sizeof(gateway->target.mac_msb)) == 0))
+    {
+        gateway->target_last_rssi = report->rssi;
+        gateway->target_adv_tick = TaskGetTick();
+
+        if (name_found != 0)
+            gateway->target_name_seen = 1u;
+
+        if (gateway->target_mac_seen == 0u)
+        {
+            NS_LOG_INFO("[BMS] target ADV t=%lu name=%d rssi=%d type=%u\r\n",
+                        (unsigned long)TaskGetTick(), name_found,
+                        (int)report->rssi, (unsigned)report->addr_type);
+        }
+
+        gateway->target_mac_seen = 1u;
+    }
+
+    switch (gateway->target.type)
+    {
+        case GATEWAY_TARGET_ADDRESS:
+            // 无本次名称时，只能复用同 MAC、同地址类型的有效缓存名。 
+            matched = (Byte)((memcmp(report->mac, gateway->target.mac_msb, sizeof(gateway->target.mac_msb)) == 0) &&
+                                ((name_found != 0) ||
+                                 ((gateway->target.address_type == report->addr_type) &&
+                                  (ble_gateway_bms_name_is_valid((const Byte *)gateway->target.name, BLE_GATEWAY_BMS_NAME_LENGTH) != 0u))));
+            break;
+
+        case GATEWAY_TARGET_NAME:
+            matched = (Byte)((name_found != 0) &&
+                                (memcmp(found_name, gateway->target.name, BLE_GATEWAY_BMS_NAME_LENGTH) == 0));
+            break;
+
+        case GATEWAY_TARGET_NONE:
+            matched = (Byte)(name_found != 0);
+            break;
+
+        default:
+            return;
+    }
+
+    if (matched == 0u)
+        return;
+
+    if (ble_gateway_fallback_active(gateway) != 0u)
+    {
+        gateway->fallback.waiting = 0u;
+        if ((gateway->fallback.temporary != 0u) && (status.bms_linked != 0u))
+        {
+            gateway_bms_peer_info_t *peer = &gateway->fallback.return_peer;
+            memset(peer, 0, sizeof(*peer));
+            peer->valid = 1u;
+            peer->address_type = report->addr_type;
+            memcpy(peer->mac_msb, report->mac, sizeof(peer->mac_msb));
+            memcpy(peer->name, name_found ? found_name : gateway->target.name, BLE_GATEWAY_BMS_NAME_LENGTH);
+            gateway->fallback.returning = 1u;
+            gateway->fallback.disconnect_sent = 0u;
+            gateway->target_restart_pending = 1u;
+            Proto_TargetRequestReset();
+            SysPlatform_TimerSet(BLE_GATEWAY_MSG_FALLBACK, 1u);
+            return;
+        }
+        gateway->fallback.temporary = 0u;
+        gateway->fallback.open = 0u;
+        ble_gateway_session_begin(gateway);
+    }
+
+    memset(&gateway->bms_peer, 0, sizeof(gateway->bms_peer));
+
+    if (name_found != 0)
+        memcpy(gateway->bms_peer.name, found_name, BLE_GATEWAY_BMS_NAME_LENGTH);
+    else if (ble_gateway_bms_name_is_valid((const Byte *)gateway->target.name, BLE_GATEWAY_BMS_NAME_LENGTH) != 0)
+        memcpy(gateway->bms_peer.name, gateway->target.name, BLE_GATEWAY_BMS_NAME_LENGTH);
+
+    gateway->bms_peer.name[BLE_GATEWAY_BMS_NAME_LENGTH] = '\0';
+    memcpy(gateway->bms_peer.mac_msb, report->mac, sizeof(gateway->bms_peer.mac_msb));
+    gateway->bms_peer.address_type = report->addr_type;
+    gateway->bms_peer.valid = 1;
+    ble_gateway_target_learn(gateway);
+    ble_gateway_bms_peer_log("matched", &gateway->bms_peer);
+    (void)ble_gateway_control(gateway, BLE_DEV_IOC_SCAN_STOP, 0);
+    ble_gateway_bms_peer_log("connecting", &gateway->bms_peer);
+
+    if (ble_gateway_connect_start(gateway, report->mac, report->addr_type) != CHAR_DEV_OK)
+    {
+        gateway->bms_peer.valid = 0;
+        NS_LOG_ERROR("[BMS] connect start failed\r\n");
+        SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, BLE_GATEWAY_DISCOVERY_MS);
+    }
+}
+
+//打开或重启本机的广播服务
+static void ble_gateway_discovery_process(gateway_app_t *gateway)
+{
+    ble_port_status_t status;
+
+    if (gateway == 0)
+        return;
+
+    ble_gateway_session_timeout_process(gateway);
+    if (gateway->fallback.returning != 0u)
+        return;
+
+    if (gateway->target_discovery_suspended != 0u)
+        return;
+
+    if (FirmwareUpdate_IsActive() != 0u)
+    {
+        SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, BLE_GATEWAY_DISCOVERY_MS);
+        return;
+    }
+
+    status = ble_gateway_port_status_get(gateway);
+
+    // INIT 状态清理可能先于 LINK_UP 事件到达；避免第二次建连尝试。
+    if ((gateway->bms_connect_pending != 0u) ||
+        (status.bms_linked != 0u) || (status.connecting != 0u) || (status.scanning != 0u))
+        return;
+
+    if (gateway->session_active == 0u)
+        ble_gateway_session_begin(gateway);
+
+    gateway->target_restart_pending = 0u;
+
+    // 首次 MAC 绑定先扫描取得名称，完整缓存仍可直接连接。 
+    if ((gateway->target.type == GATEWAY_TARGET_ADDRESS) &&
+        (gateway->target.address_type <= 1u) &&
+        (gateway->target_scan_fallback == 0u) &&
+        ((ble_gateway_fallback_active(gateway) == 0u) || (gateway->fallback.open == 0u)) &&
+        (ble_gateway_bms_name_is_valid((const Byte *)gateway->target.name, BLE_GATEWAY_BMS_NAME_LENGTH) != 0u))
+    {
+        memset(&gateway->bms_peer, 0, sizeof(gateway->bms_peer));
+        gateway->bms_peer.valid = 1u;
+        gateway->bms_peer.address_type = gateway->target.address_type;
+        memcpy(gateway->bms_peer.mac_msb, gateway->target.mac_msb, sizeof(gateway->bms_peer.mac_msb));
+        memcpy(gateway->bms_peer.name, gateway->target.name, BLE_GATEWAY_BMS_NAME_LENGTH);
+        ble_gateway_bms_peer_log("direct connecting", &gateway->bms_peer);
+
+        if (ble_gateway_connect_start(gateway, gateway->target.mac_msb, gateway->target.address_type) == CHAR_DEV_OK)
+        {
+            gateway->target_scan_fallback = 1u;
+            return;
+        }
+
+        gateway->bms_peer.valid = 0u;
+    }
+
+    gateway->bms_connection_state = PROTO_BMS_CONNECTING;
+
+    if (ble_gateway_control(gateway, BLE_DEV_IOC_SCAN_START, 0) != CHAR_DEV_OK)
+        SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, BLE_GATEWAY_DISCOVERY_MS);
+
+}
+
+//从机定时数据交互
+static void ble_gateway_bms_poll_process(gateway_app_t *gateway)
+{
+    static Byte poll_x16 = 0;
+    static const Byte x16_req = 0x00;
+
+    if ((gateway == 0) || (ble_gateway_bms_linked(gateway) == 0) || (ble_gateway_bms_ready(gateway) == 0))
+        return;
+
+    if ((FirmwareUpdate_IsActive() == 0) &&
+        (Proto_Send(PROTO_PORT_BLE_MASTER, 0x00, (poll_x16 ^= 1) ? PROTO_CMD_X11 : PROTO_CMD_X16, poll_x16 ? 0 : &x16_req, poll_x16 ? 0 : 1) == 0))
+        ble_gateway_app_event_notify(MY_BLE_EVENT_ACTIVITY);
+
+    SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_POLL, BLE_GATEWAY_BMS_POLL_MS);
+}
+
+static void ble_gateway_connect_diag(gateway_app_t *gateway, const ble_port_status_t *status)
+{
+    UInt32 now = TaskGetTick();
+
+    if ((FirmwareUpdate_IsActive() != 0u) || (gateway->target_discovery_suspended != 0u) ||
+        ((UInt32)(now - gateway->connect_diag_tick) < BLE_GATEWAY_CONNECT_DIAG_MS))
+        return;
+
+    gateway->connect_diag_tick = now;
+    NS_LOG_INFO("[BMS] wait t=%lu state=%u scan=%u init=%u link=%u pending=%u seen=%u rssi=%d age=%lu name_rx=%u\r\n",
+                (unsigned long)now, (unsigned)gateway->bms_connection_state,
+                (unsigned)status->scanning, (unsigned)status->connecting,
+                (unsigned)status->bms_linked, (unsigned)gateway->bms_connect_pending,
+                (unsigned)gateway->target_mac_seen, (int)gateway->target_last_rssi,
+                (unsigned long)((gateway->target_mac_seen != 0u) ? (UInt32)(now - gateway->target_adv_tick) : 0u),
+                (unsigned)gateway->target_name_seen);
+}
+
+
+//蓝牙核心事件回调处理函数
+static void ble_gateway_message_process(UInt16 message_id, void const *parameter)
+{
+    (void)parameter;
+    ble_gateway_session_timeout_process(&s_gw_dev);
+    ble_gateway_failure_notify_process(&s_gw_dev);
+
+    switch (message_id)
+    {
+        case BLE_GATEWAY_MSG_PROCESS:
+        {
+            Byte pending;
+            ble_gateway_upgrade_priority_process(&s_gw_dev);
+            pending = ble_gateway_relay_process(&s_gw_dev);
+            // 升级开始或终止
+            ble_gateway_upgrade_priority_process(&s_gw_dev);
+            // 进入对应任务
+            SysPlatform_TimerSet(BLE_GATEWAY_MSG_PROCESS, pending ? BLE_GATEWAY_PROCESS_CONTINUE_MS : BLE_GATEWAY_PROCESS_PERIOD_MS);
+            break;
+        }
+
+        case BLE_GATEWAY_MSG_FALLBACK:
+            ble_gateway_fallback_process(&s_gw_dev);
+            /* A queued message after disabling must not restart the timer. */
+            ble_gateway_fallback_timer_update(&s_gw_dev);
+            break;
+
+        case BLE_GATEWAY_MSG_DISCOVERY:
+            ble_gateway_discovery_process(&s_gw_dev);
+            break;
+
+        case BLE_GATEWAY_MSG_WATCHDOG:
+        {
+            ble_port_status_t status = ble_gateway_port_status_get(&s_gw_dev);
+
+            if (My_Ble_BackgroundBusy() == 0u)
+                ble_gateway_control(&s_gw_dev, BLE_DEV_IOC_ADV_DIAG, 0);
+            else
+                ble_gateway_connect_diag(&s_gw_dev, &status);
+
+            if ((s_gw_dev.target_discovery_suspended == 0u) &&
+                (s_gw_dev.bms_connect_pending == 0u) &&
+                (status.bms_linked == 0) && (status.scanning == 0) && (status.connecting == 0))
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, 1);
+
+            SysPlatform_TimerSet(BLE_GATEWAY_MSG_WATCHDOG, BLE_GATEWAY_WATCHDOG_MS);
+            break;
+        }
+
+        case FW_UPDATE_TIMER_MESSAGE_ID:
+            FirmwareUpdate_Tick();
+            break;
+
+        case BLE_GATEWAY_MSG_BMS_POLL:
+            ble_gateway_bms_poll_process(&s_gw_dev);
+            break;
+
+        case BLE_GATEWAY_MSG_BMS_HEALTH:
+            if (FirmwareUpdate_IsActive() != 0u)
+            {
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_HEALTH, BLE_GATEWAY_BMS_HEALTH_MS);
+                break;
+            }
+
+            if ((s_gw_dev.target_restart_pending == 0u) &&
+                (s_gw_dev.target_discovery_suspended == 0u) &&
+                (ble_gateway_bms_linked(&s_gw_dev) != 0) &&
+                ((ble_gateway_bms_ready(&s_gw_dev) == 0) ||
+                 (s_gw_dev.bms_rx_seen == 0)))
+            {
+                NS_LOG_ERROR("[BMS] profile/first response timeout; reconnecting\r\n");
+                ble_gateway_session_retry(&s_gw_dev);
+                ble_gateway_bms_ready_clear(&s_gw_dev);
+                ble_gateway_bms_poll_stop();
+                ble_gateway_app_event_notify(MY_BLE_EVENT_CONNECTION_FAILED);
+                control(s_gw_dev.bms, BLE_DEV_IOC_DISCONNECT, 0);
+            }
+
+            break;
+
+        case BLE_GATEWAY_MSG_SESSION_TIMEOUT:
+
+            // 避免重复超时
+            if (s_gw_dev.session_active != 0u)
+            {
+                UInt32 elapsed = (UInt32)(TaskGetTick() - s_gw_dev.session_started_tick);
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_SESSION_TIMEOUT,
+                                     (elapsed < BLE_GATEWAY_SESSION_TIMEOUT_MS) ?
+                                     (BLE_GATEWAY_SESSION_TIMEOUT_MS - elapsed) : 1u);
+            }
+
+            break;
+
+        case BLE_GATEWAY_MSG_CONNECT_TIMEOUT:
+        {
+            ble_port_status_t status = ble_gateway_port_status_get(&s_gw_dev);
+            UInt32 elapsed;
+
+			// 如果没有连接标志，直接退出
+            if (s_gw_dev.bms_connect_pending == 0u)
+                break;
+
+            if ((status.bms_linked != 0u) || (ble_gateway_bms_linked(&s_gw_dev) != 0u))
+            {
+                s_gw_dev.bms_connect_pending = 0u;
+                ble_gateway_connect_timeout_stop();
+                break;
+            }
+
+            elapsed = (UInt32)(TaskGetTick() - s_gw_dev.connect_started_tick);
+
+            if (elapsed < BLE_GATEWAY_CONNECT_TIMEOUT_MS)
+            {
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_CONNECT_TIMEOUT,
+                                     BLE_GATEWAY_CONNECT_TIMEOUT_MS - elapsed);
+                break;
+            }
+
+            s_gw_dev.bms_connect_pending = 0u;
+            s_gw_dev.bms_connection_state = PROTO_BMS_CONNECTING;
+            NS_LOG_INFO("[BMS] attempt timeout t=%lu elapsed=%lu scan=%u init=%u; retry\r\n",
+                        (unsigned long)TaskGetTick(), (unsigned long)elapsed,
+                        (unsigned)status.scanning, (unsigned)status.connecting);
+            ble_gateway_app_event_notify(MY_BLE_EVENT_CONNECTION_FAILED);
+
+            if (status.connecting != 0u)
+                (void)ble_gateway_control(&s_gw_dev, BLE_DEV_IOC_CONNECT_CANCEL, 0);
+            else if (status.scanning == 0u)
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, 1u);
+
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+//蓝牙底层数据接收回调函数
+static void ble_gateway_rx_indicate(device_t *device, UInt32 size)
+{
+    gateway_app_t *gateway;
+    (void)size;
+
+    if (device == 0)
+        return;
+
+    gateway = (gateway_app_t *)device->user_data;
+
+    if (ble_gateway_endpoint_get(gateway, device) == BLE_ENDPOINT_INVALID)
+        return;
+
+    if (device == gateway->bms)
+    {
+        gateway->bms_rx_seen = 1;
+        ble_gateway_bms_health_stop();
+    }
+
+    SysPlatform_MessagePost(BLE_GATEWAY_MSG_PROCESS);
+}
+
+//蓝牙发送完成
+static void ble_gateway_tx_complete(device_t *device, const void *buffer)
+{
+    gateway_app_t *gateway;
+    (void)buffer;
+
+    if (device == 0)
+        return;
+
+    gateway = (gateway_app_t *)device->user_data;
+
+    if (ble_gateway_endpoint_get(gateway, device) != BLE_ENDPOINT_INVALID)
+        SysPlatform_MessagePost(BLE_GATEWAY_MSG_PROCESS);
+}
+//蓝牙协议栈回调处理函数
+static void ble_gateway_port_event(void *user_data, device_t *device, ble_port_event_t event, const void *parameter)
+{
+    gateway_app_t *gateway = (gateway_app_t *)user_data;
+    ble_endpoint_id_t endpoInt16 = ble_gateway_endpoint_get(gateway, device);
+
+    if (gateway == 0)
+        return;
+
+    ble_gateway_session_timeout_process(gateway);
+
+    switch (event)
+    {
+        case BLE_PORT_EVENT_READY:
+            ble_gateway_fallback_timer_update(gateway);
+
+            if (ble_gateway_app_event_notify(MY_BLE_EVENT_READY) != CHAR_DEV_OK)
+            {
+                (void)ble_gateway_app_event_notify(MY_BLE_EVENT_ERROR);
+                NS_LOG_ERROR("[GW] cannot start subscribed tasks\r\n");
+            }
+            NS_LOG_INFO("[GW] Stack ready\r\n");
+            SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, BLE_GATEWAY_DISCOVERY_MS);
+            SysPlatform_TimerSet(BLE_GATEWAY_MSG_WATCHDOG, BLE_GATEWAY_WATCHDOG_MS);
+            SysPlatform_TimerSet(BLE_GATEWAY_MSG_PROCESS, BLE_GATEWAY_PROCESS_PERIOD_MS);
+            break;
+
+        case BLE_PORT_EVENT_LINK_UP:
+        {
+            const ble_dev_conn_info_t *info = (const ble_dev_conn_info_t *)parameter;
+
+            if (endpoInt16 >= BLE_ENDPOINT_COUNT)
+                break;
+
+			ble_gateway_phone_relay_reset(gateway);
+            if (endpoInt16 == BLE_ENDPOINT_BMS)
+            {
+                ble_gateway_connect_timeout_stop();
+                gateway->bms_connect_pending = 0u;
+
+                if ((gateway->target_restart_pending != 0) ||
+                    (gateway->target_discovery_suspended != 0u) ||
+                    (FirmwareUpdate_IsActive() != 0u))
+                {
+                    gateway->bms_state = GATEWAY_BMS_DOWN;
+                    (void)control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0);
+                    break;
+                }
+                if ((info != 0) && (info->mac != 0) &&
+                    (((gateway->fallback.temporary != 0u) &&
+                      ((gateway->bms_peer.valid == 0u) || (memcmp(info->mac, gateway->bms_peer.mac_msb, 6u) != 0))) ||
+                     ((gateway->fallback.temporary == 0u) && (gateway->target.type == GATEWAY_TARGET_ADDRESS) &&
+                      (memcmp(info->mac, gateway->target.mac_msb, 6u) != 0))))
+                {
+                    NS_LOG_ERROR("[BMS] connected peer does not match saved MAC\r\n");
+                    ble_gateway_session_retry(gateway);
+                    (void)control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0);
+                    break;
+                }
+
+                if ((info != 0) && (info->mac != 0))
+                {
+                    if (gateway->bms_peer.valid == 0)
+                    {
+                        memset(&gateway->bms_peer, 0, sizeof(gateway->bms_peer));
+                        gateway->bms_peer.address_type = gateway->target.address_type;
+                    }
+
+                    memcpy(gateway->bms_peer.mac_msb, info->mac, sizeof(gateway->bms_peer.mac_msb));
+                    gateway->bms_peer.valid = 1;
+                }
+            }
+
+            if (endpoInt16 == BLE_ENDPOINT_PHONE)
+            {
+                gateway->phone_link_up = 1u;
+                Proto_PhoneRxReset();
+            }
+            else
+            {
+                gateway->bms_state = GATEWAY_BMS_LINKED;
+                gateway->bms_connection_state = PROTO_BMS_CONNECTING;
+            }
+
+            if (endpoInt16 == BLE_ENDPOINT_PHONE)
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, 1);
+            else
+            {
+                Proto_BmsDataInvalidate();
+                gateway->bms_rx_seen = 0;
+                gateway->bms_secured = 0;
+                ble_gateway_bms_poll_stop();
+                ble_gateway_bms_health_stop();
+
+                /* BMS作为从机会主动发起SMP配对(手机连接时需点击配对)：
+                   本机不主动发起，只在底层自动应答配对；待BMS_SECURED事件
+                   (配对/加密完成)后再交换MTU、发现服务。5s健康超时兜底 */
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_HEALTH, BLE_GATEWAY_BMS_HEALTH_MS);
+                ble_gateway_bms_peer_log("connected, waiting pairing", &gateway->bms_peer);
+            }
+
+            break;
+        }
+
+        case BLE_PORT_EVENT_BMS_SECURED:
+            /* 配对/加密完成：此时访问加密属性才不会被拒，开始交换MTU并发现FF00服务。
+               PAIR_SUCCEED与ENC_SUCCEED可能各上报一次，仅处理第一次 */
+            if ((endpoInt16 != BLE_ENDPOINT_BMS) ||
+                (gateway->target_restart_pending != 0u) ||
+                (gateway->target_discovery_suspended != 0u) ||
+                (ble_gateway_bms_linked(gateway) == 0u) ||
+                (gateway->bms_secured != 0u))
+                break;
+
+            gateway->bms_secured = 1u;
+            NS_LOG_INFO("[BMS] link secured, discovering profile\r\n");
+
+            /* 配对耗时不计入发现阶段预算：重新给完整的健康超时窗口 */
+            SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_HEALTH, BLE_GATEWAY_BMS_HEALTH_MS);
+
+            if (control(gateway->bms, BLE_DEV_IOC_EXCHANGE_MTU, (void *)(uintptr_t)517) != CHAR_DEV_OK)
+                NS_LOG_WARNING("[BMS] MTU exchange request failed\r\n");
+
+            if (control(gateway->bms, BLE_DEV_IOC_BMS_DATA_ENABLE, 0) != CHAR_DEV_OK)
+            {
+                NS_LOG_ERROR("[BMS] profile discovery start failed\r\n");
+                ble_gateway_session_retry(gateway);
+                (void)control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0);
+            }
+
+            break;
+
+        case BLE_PORT_EVENT_BMS_PAIR_FAILED:
+            /* 底层ns_sec配对失败后会主动断开，LINK_DOWN流程负责重连扫描；健康超时兜底 */
+            NS_LOG_ERROR("[BMS] pairing failed, waiting for disconnect/reconnect\r\n");
+            break;
+
+        case BLE_PORT_EVENT_LINK_DOWN:
+            if (endpoInt16 >= BLE_ENDPOINT_COUNT)
+                break;
+
+			ble_gateway_phone_relay_reset(gateway);
+            if (endpoInt16 == BLE_ENDPOINT_PHONE)
+            {
+                gateway->phone_link_up = 0u;
+                Proto_PhoneRxReset();
+            }
+            else
+            {
+                gateway->bms_state = GATEWAY_BMS_DOWN;
+                gateway->bms_connect_pending = 0u;
+
+                if (gateway->target_discovery_suspended == 0u)
+                {
+                    if (gateway->session_active == 0u)
+                        ble_gateway_session_begin(gateway);
+
+                    gateway->bms_connection_state = PROTO_BMS_CONNECTING;
+                }
+            }
+
+            if (endpoInt16 == BLE_ENDPOINT_PHONE)
+            {
+                FirmwareUpdate_AbortPort(PROTO_PORT_BLE_SLAVE);
+                ble_gateway_control(gateway, BLE_DEV_IOC_ADV_START, 0);
+            }
+            else
+            {
+                ble_gateway_connect_timeout_stop();
+                gateway->bms_rx_seen = 0;
+                gateway->bms_secured = 0;
+                Proto_BmsDataInvalidate();
+                ble_gateway_bms_poll_stop();
+                ble_gateway_bms_health_stop();
+                ble_gateway_bms_peer_log("disconnected", &gateway->bms_peer);
+                gateway->bms_peer.valid = 0;
+                if (gateway->fallback.returning != 0u)
+                    SysPlatform_TimerSet(BLE_GATEWAY_MSG_FALLBACK, 1u);
+                else
+                    ble_gateway_app_event_notify(MY_BLE_EVENT_CONNECTION_FAILED);
+
+                if (gateway->target_discovery_suspended == 0u)
+                    SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, BLE_GATEWAY_DISCOVERY_MS);
+            }
+
+            break;
+
+        case BLE_PORT_EVENT_CONTROL_RX:
+            ble_gateway_app_event_notify(MY_BLE_EVENT_ACTIVITY);
+
+            if (parameter != 0)
+            {
+                const ble_data_event_t *data_event = (const ble_data_event_t *)parameter;
+                ble_gateway_control_process(gateway, data_event->data, data_event->len);
+            }
+
+            break;
+
+        case BLE_PORT_EVENT_BMS_READY:
+
+            /* 换绑、解绑和失败退出期间，不接受旧连接迟到的就绪通知。 */
+            if ((endpoInt16 != BLE_ENDPOINT_BMS) ||
+                (gateway->target_restart_pending != 0u) ||
+                (gateway->target_discovery_suspended != 0u) ||
+                (gateway->bms_connection_state == PROTO_BMS_CONNECTION_FAILED) ||
+                (ble_gateway_bms_linked(gateway) == 0u))
+                break;
+
+            if ((ble_gateway_bms_linked(gateway) != 0u) && (parameter != 0) &&
+                (*(const Byte *)parameter == 0u) &&
+                (ble_gateway_bms_identity_complete(gateway) != 0u))
+            {
+                gateway->bms_state = GATEWAY_BMS_READY;
+                gateway->bms_connection_state = PROTO_BMS_CONNECTED;
+                ble_gateway_session_stop(gateway);
+                gateway->failure_notify_pending = 0u;
+                gateway->bms_rx_seen = 0;
+                ble_gateway_target_learn(gateway);
+                if (gateway->fallback.temporary == 0u)
+                {
+                    gateway->fallback.enabled = ble_gateway_fallback_allowed(gateway);
+                    gateway->fallback.open = 0u;
+                    gateway->fallback.waiting = 0u;
+                }
+                ble_gateway_fallback_timer_update(gateway);
+
+                ble_gateway_bms_peer_log("profile ready", &gateway->bms_peer);
+                SysPlatform_TimerClear(BLE_GATEWAY_MSG_BMS_POLL);
+                ble_gateway_bms_poll_process(gateway);
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_HEALTH, BLE_GATEWAY_BMS_HEALTH_MS);
+                NS_LOG_INFO("[BMS] immediate 0x11/0x16 sent\r\n");
+            }
+            else
+            {
+                ble_gateway_bms_ready_clear(gateway);
+                ble_gateway_bms_poll_stop();
+                ble_gateway_bms_health_stop();
+                NS_LOG_ERROR("[BMS] profile or peer identity incomplete; rescanning\r\n");
+                gateway->target_scan_fallback = 1u;
+                ble_gateway_session_retry(gateway);
+                ble_gateway_app_event_notify(MY_BLE_EVENT_CONNECTION_FAILED);
+
+                if (ble_gateway_bms_linked(gateway) != 0u)
+                    control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0);
+            }
+
+            break;
+
+        case BLE_PORT_EVENT_SCAN_REPORT:
+            ble_gateway_scan_report_process(gateway, (const ble_scan_report_t *)parameter);
+            break;
+
+        case BLE_PORT_EVENT_CENTRAL_IDLE:
+        {
+            ble_port_status_t status = ble_gateway_port_status_get(gateway);
+            if (gateway->fallback.returning != 0u)
+            {
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_FALLBACK, 1u);
+                break;
+            }
+
+            // 停止扫描也会发出 idle；建连仍在进行时不能清掉它的超时。
+            if ((status.connecting != 0u) || (status.scanning != 0u))
+                break;
+
+            if ((gateway->bms_connect_pending != 0u) &&
+                (status.bms_linked == 0u) && (ble_gateway_bms_linked(gateway) == 0u))
+            {
+                if (gateway->connect_idle_seen == 0u)
+                {
+                    gateway->connect_idle_seen = 1u;
+                    NS_LOG_INFO("[BMS] init idle t=%lu; awaiting link result\r\n",
+                                (unsigned long)TaskGetTick());
+                }
+
+                break;
+            }
+
+            ble_gateway_connect_timeout_stop();
+            gateway->bms_connect_pending = 0u;
+
+            if ((gateway->target_discovery_suspended == 0u) &&
+                (ble_gateway_bms_linked(gateway) == 0))
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, 1);
+
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+static Int16 ble_gateway_proto_peer_get(proto_peer_info_t *peer)
+{
+    if (peer == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    memset(peer, 0, sizeof(*peer));
+	
+    if ((s_gw_dev.bms_connection_state == PROTO_BMS_CONNECTING) &&
+        (s_gw_dev.fallback.temporary != 0u))
+    {
+        const gateway_bms_peer_info_t *actual = (s_gw_dev.fallback.returning != 0u) ?
+                                                &s_gw_dev.fallback.return_peer : &s_gw_dev.bms_peer;
+        if (actual->valid == 0u)
+            return CHAR_DEV_ERR_STATE;
+        memcpy(peer->mac_msb, actual->mac_msb, sizeof(peer->mac_msb));
+        memcpy(peer->name, actual->name, sizeof(peer->name));
+        return CHAR_DEV_OK;
+    }
+
+    /* 连接中先回显本次目标，换绑时不能误用尚未断开的旧对端。 */
+    if ((s_gw_dev.bms_connection_state == PROTO_BMS_CONNECTING) &&
+        ((s_gw_dev.target.type == GATEWAY_TARGET_NAME) ||
+         (s_gw_dev.target.type == GATEWAY_TARGET_ADDRESS)))
+    {
+        memcpy(peer->mac_msb, s_gw_dev.target.mac_msb, sizeof(peer->mac_msb));
+        memcpy(peer->name, s_gw_dev.target.name, sizeof(peer->name));
+        return CHAR_DEV_OK;
+    }
+
+    if ((ble_gateway_bms_linked(&s_gw_dev) == 0u) ||
+        (s_gw_dev.bms_peer.valid == 0u))
+        return CHAR_DEV_ERR_STATE;
+
+    memcpy(peer->mac_msb, s_gw_dev.bms_peer.mac_msb,
+           sizeof(peer->mac_msb));
+    memcpy(peer->name, s_gw_dev.bms_peer.name,
+           sizeof(peer->name));
+    return CHAR_DEV_OK;
+}
+
+static Byte ble_gateway_proto_connection_state_get(void)
+{
+    return s_gw_dev.bms_connection_state;
+}
+
+UInt16 My_Ble_ProjectNoGet(void)
+{
+    return (UInt16)((s_gw_dev.identity.project_no.HostModel << 4) |
+                      s_gw_dev.identity.project_no.SlaveModel);
+}
+
+static const proto_app_ops_t s_proto_app_ops =
+{
+    My_Ble_LocalNameSet,
+    My_Ble_LocalMacSet,
+    My_Ble_TargetSetName,
+    My_Ble_TargetSetAddress,
+    My_Ble_TargetClear,
+    My_Ble_BmsReady,
+    ble_gateway_proto_peer_get,
+    ble_gateway_proto_connection_state_get,
+    My_Ble_ProjectNoGet,
+    My_Ble_LocalIdentitySet
+};
+
+void My_Ble_Init(void)
+{
+    gateway_app_t *gateway = &s_gw_dev;
+	if ((s_event_registration_failed != 0u) || (ble_gateway_app_event_notify(MY_BLE_EVENT_INIT_CHECK) != CHAR_DEV_OK))
+		goto init_failed;
+    memset(gateway, 0, sizeof(*gateway));//清空环境
+    EEPROM_Init();
+    Flash_DeferredSaveBind(ble_gateway_target_store, My_Ble_BackgroundBusy, ble_gateway_storage_fault, gateway);
+    if (ble_gateway_identity_load(gateway) != CHAR_DEV_OK)
+        goto init_failed;
+
+    ble_gateway_target_load(gateway);//从flash拿蓝牙数据
+    gateway->fallback.enabled = (Byte)((ble_gateway_fallback_allowed(gateway) != 0u) && (gateway->target.type != GATEWAY_TARGET_NONE));
+
+    gateway->advertising_interval_ms = BLE_GATEWAY_DEFAULT_ADV_MS;
+    Proto_Init(&s_proto_app_ops);
+    SysPlatform_MessageHandlerSet(ble_gateway_message_process); //初始化蓝牙事件回调函数
+
+    if (ble_port_register(ble_gateway_port_event, gateway) != CHAR_DEV_OK)
+        goto init_failed;  //初始化蓝牙协议栈事件回调函数
+
+    gateway->phone = ble_port_phone_device();   //初始化主机
+    gateway->bms = ble_port_bms_device();       //初始化从机
+
+    if ((gateway->phone == 0) || (gateway->bms == 0))
+        goto init_failed;
+
+    rx_indicate_set(gateway->phone, ble_gateway_rx_indicate); //初始化主机接收回调
+    rx_indicate_set(gateway->bms, ble_gateway_rx_indicate); //初始化从机接收回调
+    tx_complete_set(gateway->phone, ble_gateway_tx_complete); //初始化主机发送回调
+    tx_complete_set(gateway->bms, ble_gateway_tx_complete); //初始化从机发送回调
+
+    if (init(gateway->phone) != CHAR_DEV_OK)
+        goto init_failed;    //初始化主机
+
+    if (init(gateway->bms) != CHAR_DEV_OK)
+        goto init_failed;      //初始化从机
+
+    if (ble_gateway_settings_apply(gateway) != CHAR_DEV_OK)
+        goto init_failed;  //初始化配置
+
+    if (open(gateway->phone, CHAR_DEV_OFLAG_RDWR) != CHAR_DEV_OK)
+        goto init_failed;   //打开主机收发
+
+    if (open(gateway->bms, CHAR_DEV_OFLAG_RDWR) != CHAR_DEV_OK)
+        goto init_failed;     //打开从机收发
+
+    Proto_BindPort(PROTO_PORT_BLE_MASTER, gateway->bms);    //打开主机协议
+    Proto_BindPort(PROTO_PORT_BLE_SLAVE, gateway->phone);   //打开从机协议
+    /* Persist migrated defaults after initialization, without delaying BLE. */
+    (void)EEPROM_Save(1u);
+    NS_LOG_INFO("[GW] endpoInt16 objects assembled; stack starting\r\n");
+    return;
+init_failed:
+    ble_gateway_app_event_notify(MY_BLE_EVENT_ERROR);
+    NS_LOG_ERROR("[GW] initialization failed\r\n");
+}
+//本机蓝牙名设置实现
+static void ble_gateway_project_no_changed(gateway_app_t *gateway, Byte was_allowed)
+{
+    if (was_allowed != ble_gateway_fallback_allowed(gateway))
+    {
+        /* Never turn a temporary peer into the saved target when disabling. */
+        if ((gateway->fallback.temporary != 0u) || (gateway->fallback.returning != 0u))
+            ble_gateway_target_restart(gateway);
+        else
+            memset(&gateway->fallback, 0, sizeof(gateway->fallback));
+
+        /* Enabling does not revive an explicit unbind, failed or suspended request. */
+        gateway->fallback.enabled = (Byte)((ble_gateway_fallback_allowed(gateway) != 0u) &&
+                                             (gateway->target.type != GATEWAY_TARGET_NONE) &&
+                                             (gateway->target_discovery_suspended == 0u) &&
+                                             (ble_gateway_bms_ready(gateway) != 0u));
+        ble_gateway_fallback_timer_update(gateway);
+    }
+
+}
+
+static Int16 ble_gateway_name_project_get(const Byte *name, UInt16 length,
+                                         UInt16 *project_no)
+{
+    static const struct
+    {
+        char prefix[7];
+        Byte length;
+        Byte model;
+    } models[] = {
+        {"LCM5", 4u, 0u}, {"LCM1", 4u, 1u}, {"LCM2", 4u, 2u},
+        {"D7205S", 6u, 3u}, {"D7210S", 6u, 4u}
+    };
+    UInt16 index;
+
+    if ((name == 0) || (project_no == 0) || (length == 0u) ||
+        (length > BLE_GATEWAY_NAME_STORED_SIZE))
+        return CHAR_DEV_ERR_PARAM;
+    for (index = 0u; index < length; ++index)
+    {
+        if ((name[index] < 0x20u) || (name[index] > 0x7eu))
+            return CHAR_DEV_ERR_PARAM;
+    }
+    for (index = 0u; index < (sizeof(models) / sizeof(models[0])); ++index)
+    {
+        if ((length >= models[index].length) &&
+            (memcmp(name, models[index].prefix, models[index].length) == 0))
+        {
+            *project_no = (UInt16)((65u << 4) | models[index].model);
+            return CHAR_DEV_OK;
+        }
+    }
+    return CHAR_DEV_ERR_PARAM;
+}
+
+Int16 My_Ble_LocalIdentitySet(const Byte *name, UInt16 length,
+                            const Byte address_msb[6])
+{
+    gateway_app_t *gateway = &s_gw_dev;
+    gateway_identity_t previous;
+    UInt16 project_no;
+    Byte was_allowed;
+    Int16 result;
+
+    if ((ble_gateway_name_project_get(name, length, &project_no) != CHAR_DEV_OK) ||
+        (ble_gateway_address_is_invalid(address_msb) != 0u))
+        return CHAR_DEV_ERR_PARAM;
+    if (My_Ble_BackgroundBusy() != 0u)
+        return CHAR_DEV_ERR_BUSY;
+
+    previous = gateway->identity;
+    was_allowed = ble_gateway_fallback_allowed(gateway);
+    memset(gateway->identity.name, 0, sizeof(gateway->identity.name));
+    memcpy(gateway->identity.name, name, length);
+    memcpy(gateway->identity.mac_msb, address_msb, sizeof(gateway->identity.mac_msb));
+    gateway->identity.name_policy = BLE_GATEWAY_NAME_POLICY_MANUAL;
+    gateway->identity.project_no.HostModel = (UInt16)(project_no >> 4);
+    gateway->identity.project_no.SlaveModel = (UInt16)(project_no & 0x0fu);
+
+    result = ble_gateway_settings_apply(gateway);
+    if (result == CHAR_DEV_OK)
+        result = ble_gateway_identity_save(gateway);
+    if (result != CHAR_DEV_OK)
+    {
+        gateway->identity = previous;
+        (void)ble_gateway_settings_apply(gateway);
+        return result;
+    }
+    ble_gateway_project_no_changed(gateway, was_allowed);
+    return CHAR_DEV_OK;
+}
+
+Int16 My_Ble_LocalNameSet(const Byte *name, UInt16 length)
+{
+    gateway_app_t *gateway = &s_gw_dev;
+    char previous[BLE_GATEWAY_NAME_CAPACITY];
+    UInt16 previous_policy;
+    UInt16 index;
+    Int16 result;
+
+    if ((gateway == 0) || (name == 0) || (length == 0) || (length >= sizeof(gateway->identity.name)))
+        return CHAR_DEV_ERR_PARAM;
+
+    for (index = 0; index < length; index++)
+    {
+        if ((name[index] < 0x20) || (name[index] > 0x7Eu))
+            return CHAR_DEV_ERR_PARAM;
+    }
+
+    if (My_Ble_BackgroundBusy() != 0u)
+        return CHAR_DEV_ERR_BUSY;
+
+    memcpy(previous, gateway->identity.name, sizeof(previous));
+    previous_policy = gateway->identity.name_policy;
+    memset(gateway->identity.name, 0, sizeof(gateway->identity.name));
+    memcpy(gateway->identity.name, name, length);
+    gateway->identity.name_policy = BLE_GATEWAY_NAME_POLICY_MANUAL;
+    result = ble_gateway_settings_apply(gateway);
+
+    if (result == CHAR_DEV_OK)
+        result = ble_gateway_identity_save(gateway);
+
+    if (result != CHAR_DEV_OK)
+    {
+        memcpy(gateway->identity.name, previous, sizeof(previous));
+        gateway->identity.name_policy = previous_policy;
+        ble_gateway_settings_apply(gateway);
+    }
+
+    return result;
+}
+
+//本机mac地址设置
+Int16 My_Ble_LocalMacSet(const Byte address_msb[6])
+{
+    gateway_app_t *gateway = &s_gw_dev;
+    Byte previous[6];
+    Int16 result;
+
+    if ((gateway == 0) || (ble_gateway_address_is_invalid(address_msb) != 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    if (My_Ble_BackgroundBusy() != 0u)
+        return CHAR_DEV_ERR_BUSY;
+
+    memcpy(previous, gateway->identity.mac_msb, sizeof(previous));
+    memcpy(gateway->identity.mac_msb, address_msb, sizeof(gateway->identity.mac_msb));
+    result = ble_gateway_settings_apply(gateway);
+
+    if (result == CHAR_DEV_OK)
+        result = ble_gateway_identity_save(gateway);
+
+    if (result != CHAR_DEV_OK)
+    {
+        memcpy(gateway->identity.mac_msb, previous, sizeof(previous));
+        ble_gateway_settings_apply(gateway);
+    }
+
+    return result;
+}
+//项目号设置
+Int16 My_Ble_ProjectNoSet(UInt16 project_no)
+{
+    gateway_app_t *gateway = &s_gw_dev;
+    BatteryCodeType previous;
+    Byte was_allowed;
+    Int16 result;
+
+    if (My_Ble_BackgroundBusy() != 0u)
+        return CHAR_DEV_ERR_BUSY;
+
+    previous = gateway->identity.project_no;
+    was_allowed = ble_gateway_fallback_allowed(gateway);
+    gateway->identity.project_no.SlaveModel = (UInt16)(project_no & 0x000Fu);
+    gateway->identity.project_no.HostModel = (UInt16)((project_no >> 4) & 0x0FFFu);
+    result = ble_gateway_identity_save(gateway);
+
+    if (result != CHAR_DEV_OK)
+    {
+        gateway->identity.project_no = previous;
+        return result;
+    }
+
+    ble_gateway_project_no_changed(gateway, was_allowed);
+
+    return CHAR_DEV_OK;
+}
+
+Int16 My_Ble_AdvertisingIntervalSet(UInt16 interval_ms)
+{
+    gateway_app_t *gateway = &s_gw_dev;
+    UInt16 previous;
+    Int16 result;
+
+    if ((gateway == 0) || (interval_ms < 20) || (interval_ms > 10000))
+        return CHAR_DEV_ERR_PARAM;
+
+    if (My_Ble_BackgroundBusy() != 0u)
+        return CHAR_DEV_ERR_BUSY;
+
+    previous = gateway->advertising_interval_ms;
+    gateway->advertising_interval_ms = interval_ms;
+    result = ble_gateway_settings_apply(gateway);
+
+    if (result != CHAR_DEV_OK)
+    {
+        gateway->advertising_interval_ms = previous;
+        ble_gateway_settings_apply(gateway);
+    }
+
+    return result;
+}
+
+//应用连接从机的策略
+static Int16 gateway_target_apply(gateway_app_t *gateway, const gateway_target_spec_t *target)
+{
+    if ((gateway == 0) || (target == 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    if (FirmwareUpdate_IsActive() != 0)
+        return CHAR_DEV_ERR_BUSY;
+
+    if (target->type == GATEWAY_TARGET_NONE)
+        return ble_gateway_target_clear(gateway);
+
+    if (target->type == GATEWAY_TARGET_NAME)
+        return ble_gateway_target_set_name(gateway, target->value.name.data, target->value.name.length);
+
+    if (target->type == GATEWAY_TARGET_ADDRESS)
+        return ble_gateway_target_set_address(gateway, target->value.address.address_type, target->value.address.mac_msb);
+
+    return CHAR_DEV_ERR_PARAM;
+}
+//解绑
+Int16 My_Ble_TargetClear(void)
+{
+    gateway_target_spec_t target;
+    memset(&target, 0, sizeof(target));
+    target.type = GATEWAY_TARGET_NONE;
+    return gateway_target_apply(&s_gw_dev, &target);
+}
+
+//通过蓝牙名连接
+Int16 My_Ble_TargetSetName(const Byte *name, UInt16 length)
+{
+    gateway_target_spec_t target;
+    target.type = GATEWAY_TARGET_NAME;
+    target.value.name.data = name;
+    target.value.name.length = length;
+    return gateway_target_apply(&s_gw_dev, &target);
+}
+
+//通过mac地址连接
+Int16 My_Ble_TargetSetAddress(const Byte address_msb[6])
+{
+    gateway_target_spec_t target;
+    target.type = GATEWAY_TARGET_ADDRESS;
+    target.value.address.address_type = BLE_GATEWAY_ADDRESS_TYPE_UNKNOWN;
+    target.value.address.mac_msb = address_msb;
+    return gateway_target_apply(&s_gw_dev, &target);
+}
+
+Byte My_Ble_BmsReady(void)
+{
+    return ble_gateway_bms_ready(&s_gw_dev);
+}
+
+
+void My_Ble_Run(void)
+{
+    SysPlatform_Schedule();
+}

@@ -1,0 +1,846 @@
+/**
+*     Copyright (c) 2025, NSING Technologies Inc.
+*
+*     All rights reserved.
+*
+*     This software is the exclusive property of NSING Technologies Inc. (Hereinafter
+* referred to as NSING). This software, and the product of NSING described herein
+* (Hereinafter referred to as the Product) are owned by NSING under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     NSING does not grant any license under its patents, copyrights, trademarks, or other
+* intellectual property rights. Names and brands of third party may be mentioned or referred
+* thereto (if any) for identification purposes only.
+*
+*     NSING reserves the right to make changes, corrections, enhancements, modifications, and
+* improvements to this software at any time without notice. Please contact NSING and obtain
+* the latest version of this software before placing orders.
+
+*     Although NSING has attempted to provide accurate and reliable information, NSING assumes
+* no responsibility for the accuracy and reliability of this software.
+*
+*     It is the responsibility of the user of this software to properly design, program, and test
+* the functionality and safety of any application made of this information and any resulting product.
+* In no event shall NSING be liable for any direct, indirect, incidental, special,exemplary, or
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     NSING Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify NSING and hold NSING
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by NSING, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     NSING products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations.
+* User shall comply with any applicable export control laws and regulations promulgated and administered by
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+/**
+ * @file ns_ble.h
+ * @author NSING Firmware Team
+ * @version v1.0.0
+ *
+ * @copyright Copyright (c) 2025, NSING Technologies Inc. All rights reserved.
+ */
+
+#ifndef _NS_BLE_H_
+#define _NS_BLE_H_
+
+/* Includes ------------------------------------------------------------------*/
+
+#include "rwip_config.h"     // SW configuration
+
+#if (BLE_APP_PRESENT)
+#include "global_func.h"
+
+/* Define ------------------------------------------------------------*/
+/*
+ * MACROS
+ **/
+
+#define SECS_UNIT_1_25_MS              (800)
+#define SECS_UNIT_10MS                 (100)
+#define SECS_TO_UNIT(sec,uint)         ((sec)*(uint))
+
+#define MSECS_UNIT_1_25_MS              (1250)
+#define MSECS_UNIT_10_MS                (10000)
+#define MSECS_TO_UNIT(msec,uint)        ((msec*1000)/(uint))
+
+/// Maximal length of the Device Name value(the length is configurable)
+#define APP_DEVICE_NAME_MAX_LEN      (25)   /* v2.4.3.8: 18 clipped the 24B product name in scan-rsp */
+
+/// Device IRK used for Resolvable Private Address generation (LSB first)
+#define SEC_DEFAULT_IRK  "\x50\x19\x21\x90\x1f\x04\xd5\x62\x4f\xa4\x89\xab\x90\xd0\xcf\x23"
+
+/**
+* @addtogroup APP
+* @ingroup TASK_APP
+*
+* @brief Application entry point.
+*
+* @{
+**/
+#define APP_HANDLERS(subtask)    {&subtask##_msg_handler_list[0], ARRAY_LEN(subtask##_msg_handler_list)}
+
+
+/* Typedef -----------------------------------------------------------*/
+typedef void (* ble_hw_check_t)(uint8_t, uint32_t);
+typedef void (*ns_ble_add_prf_func_t)(void);
+
+/**
+ * @brief The current operation of activity .
+ */
+enum current_op_t
+{
+    CURRENT_OP_NULL,
+    //adv
+    CURRENT_OP_CREATE_ADV,
+    CURRENT_OP_SET_ADV_DATA,
+    CURRENT_OP_SET_RSP_DATA,
+    CURRENT_OP_START_ADV,
+    CURRENT_OP_STOP_ADV,
+    CURRENT_OP_DELETE_ADV,
+    //scan
+    CURRENT_OP_CREATE_SCAN,
+    CURRENT_OP_START_SCAN,
+    CURRENT_OP_STOP_SCAN,
+    CURRENT_OP_DELETE_SCAN,
+
+    //init (master connect)
+    CURRENT_OP_CREATE_INIT,
+    CURRENT_OP_START_INIT,
+    CURRENT_OP_STOP_INIT,
+    CURRENT_OP_DELETE_INIT,
+};
+
+/**
+ * @brief The Advertising state machine .
+ */
+enum app_adv_state
+{
+    /// Advertising activity does not exists
+    APP_ADV_STATE_IDLE = 0,
+#if BLE_APP_PRF
+    /// Creating advertising activity
+    APP_ADV_STATE_CREATING,
+    /// Setting advertising data
+    APP_ADV_STATE_SETTING_ADV_DATA,
+    /// Setting scan response data
+    APP_ADV_STATE_SETTING_SCAN_RSP_DATA,
+
+    /// Advertising activity created
+    APP_ADV_STATE_CREATED,
+    /// Starting advertising activity
+    APP_ADV_STATE_STARTING,
+    /// Advertising activity started
+    APP_ADV_STATE_STARTED,
+    /// Stopping advertising activity
+    APP_ADV_STATE_STOPPING,
+#endif //(BLE_APP_PRF)
+};
+
+/**
+ * @brief The Advertising mode .
+ */
+enum app_adv_mode
+{
+    APP_ADV_MODE_IDLE = 0,
+    APP_ADV_MODE_ENABLE,
+    APP_ADV_MODE_DIRECTED,
+    APP_ADV_MODE_FAST,
+    APP_ADV_MODE_SLOW,
+    APP_ADV_MODE_STOP,
+
+};
+
+/**
+ * @brief The app ble message event for callback .
+ */
+enum app_ble_msg
+{
+    APP_BLE_NULL_MSG = 0,
+    APP_BLE_OS_READY,
+    APP_BLE_GAP_CONNECTED,
+    APP_BLE_GAP_DISCONNECTED,
+    APP_BLE_GAP_PARAMS_REQUEST,
+    APP_BLE_GAP_CMP_EVT,
+    APP_BLE_GAP_RSSI_IND,
+    APP_BLE_GATTC_MTU_IND,
+    APP_BLE_GAP_PARAMS_IND,
+    APP_BLE_GATTC_CMP_EVT,
+};
+
+/**
+ * @brief The ble callback message environment structure for Application.
+ */
+struct ble_msg_t
+{
+    enum app_ble_msg msg_id;
+
+    //income message
+    union
+    {
+        struct gapm_cmp_evt const              *p_gapm_cmp;
+        struct gapc_connection_req_ind const   *p_connection_ind;
+        struct gapc_disconnect_ind const       *p_disconnect_ind;
+        struct gapc_param_update_req_ind const *p_param_req;
+        struct gapc_cmp_evt const              *p_gapc_cmp;
+        struct gapc_con_rssi_ind const         *p_gapc_rssi;
+        struct gattc_mtu_changed_ind const     *p_gattc_mtu;
+        struct gapc_param_updated_ind const    *p_param_updated;
+        struct gattc_cmp_evt const             *p_gattc_cmp;
+    } msg;
+    // output command
+    union
+    {
+        struct gapm_set_dev_config_cmd         *p_dev_config;
+        struct gapc_connection_cfm             *p_connection_cfm;
+        struct gapc_param_update_cfm           *p_param_cfm;
+    } cmd;
+    /// Connection index associated with a connection-scoped event
+    uint8_t conn_index;
+};
+
+/**
+ * @brief The Low-speed clock configuration type.
+ */
+typedef enum
+{
+    BLE_LSC_LSI_32000HZ = 0,
+    BLE_LSC_LSI_32768HZ,
+    BLE_LSC_LSI_28800HZ,
+    BLE_LSC_LSE_32768HZ  /**the external 32.768k crystal*/
+} ble_lsc_cfg_t;
+
+/* Public define ------------------------------------------------------------*/
+/**
+ * @brief Structure containing information about the handlers for an application subtask.
+ */
+struct app_subtask_handlers
+{
+    const struct ke_msg_handler *p_msg_handler_tab;  /**< Pointer to the message handler table */
+    uint16_t msg_cnt;     /**< Number of messages handler */
+};
+
+/**
+ * @brief Application connection environment structure.
+ * @{ APP_CON_IDX_MAX less than BLE_CONNECTION_MAX-1
+ */
+enum app_connection_num
+{
+    APP_CON_IDX_0 = 0,
+    APP_CON_IDX_1,
+    APP_CON_IDX_2,
+    APP_CON_IDX_3,
+    APP_CON_IDX_4,
+    APP_CON_IDX_MAX,
+};
+
+/**
+ * @brief Connection environment structure for Application.
+ */
+struct app_con_env_tag
+{
+    uint16_t conhdl;    /**< Connection handle */
+    uint8_t  conidx;    /**< Connection Index */
+    uint8_t peer_addr_type;      /**< connected peer address type */
+    struct bd_addr peer_addr;    /**< connected peer address */
+    uint16_t max_mtu;        /**< Maximum device MTU size */
+    uint16_t tx_pkt_size;  /**< DLE, the maximum number of payload octets in TX */
+    uint8_t role;                /**< Role of device in connection (0 = Master / 1 = Slave) */
+
+};
+
+/**
+ * @brief Application environment structure.
+ */
+struct app_env_tag
+{
+    uint16_t conhdl;                            /**< Connection handle */
+    uint8_t  conidx;                            /**< Connection Index */
+    uint8_t adv_actv_idx;                   /**< Advertising activity index */
+    uint8_t adv_state;                      /**< Current advertising state (@see enum app_adv_state) */
+    uint8_t current_op;                     /**< the current completed operation */
+    enum app_adv_mode adv_mode;     /**< Advertising mode */
+    uint8_t next_svc;                           /**< Last initialized profile */
+
+    uint8_t peer_addr_type;             /**< Latest connected peer address type */
+    struct bd_addr peer_addr;           /**< Latest connected peer address */
+    uint8_t loc_irk[KEY_LEN];           /**< Local device IRK */
+    struct gap_sec_key peer_irk;    /**< peer device IRK */
+    uint8_t rand_cnt;                           /**< Counter used to generate IRK */
+    uint16_t max_mtu;                           /**< Maximum device MTU size */
+    uint16_t tx_pkt_size;                   /**< DLE, the maximum number of payload octets in TX */
+
+    //master device
+    uint8_t scan_actv_idx;              /**< Scan activity index */
+    uint8_t init_actv_idx;              /**< Init activity index */
+    uint8_t target_found;                   /**< flag for founding the target nearby */
+    uint8_t target_addr_type;           /**< target device address type */
+    struct bd_addr target_addr;     /**< target device address going to connect */
+
+    void (*ble_msg_handler)(struct ble_msg_t const *);                  /**< ble msg hanlder */
+    void (*user_msg_handler)(ke_msg_id_t const, void const *);  /**< user msg handler */
+
+#if (BLE_APP_NS_IUS)
+    uint8_t manual_conn_param_update;       /**< flag for connection paramter update in OTA */
+    uint8_t manual_mtu_update;                  /**< flag for mtu update in OTA */
+#endif
+    struct app_con_env_tag conn_env[APP_CON_IDX_MAX];       /**< Connection environment structure for Application */
+
+    uint32_t rssi_intv;         /**< the interval for getting rssi */
+    uint8_t  rssi_conidx;       /**< the conidx for getting rssi */
+    ble_lsc_cfg_t lsc_cfg;  /**< The Low-speed clock type */
+    bool  wl_reconnect;         /**< the flag for reconnect with white list  */
+};
+
+/**
+ * @brief Application GAP device information structure.
+ */
+struct ns_gap_params_t
+{
+    uint16_t att_cfg;                   /**<Attribute database configuration (@see enum gapm_att_cfg_flag) */
+    uint8_t dev_role;                   /**< Device role (@see enum gap_role) */
+    uint8_t mac_addr_type;      /**< Device MAC address type (enum gapm_own_addr) */
+    struct bd_addr mac_addr;    /**< Device MAC address */
+    uint16_t appearance;            /**< Device appearance */
+    uint8_t dev_name_len;           /**< Device Name length */
+    uint8_t dev_name[APP_DEVICE_NAME_MAX_LEN];  /**< Device Name */
+    struct gapc_conn_param dev_conn_param;          /**< Device connection parameters */
+    uint16_t conn_param_update_delay;                       /**< Delay time of update connection parameters, 0 mean not active */
+};
+
+/**
+ * @brief Advertising time parameters in APP.
+ */
+struct adv_time_t
+{
+    uint8_t enable;
+    uint16_t duration; /**< Advertising duration (in unit of 10ms). 0 means that advertising continues until the host disable it*/
+    uint16_t adv_intv; /**< Advertising interval (in unit of 625us). Must be greater than 20ms */
+};
+
+/**
+ * @brief Advertising environment structure in Application.
+ */
+struct ns_adv_params_t
+{
+    void (*ble_adv_msg_handler)(enum app_adv_mode); /**< app_adv_mode callback function */
+    uint8_t adv_data[ADV_DATA_LEN];                                 /**< lagency advertising data */
+    uint8_t adv_data_len;                                                       /**< lagency advertising data length*/
+    uint8_t scan_rsp_data[ADV_DATA_LEN];                        /**< scan response data */
+    uint8_t scan_rsp_data_len;                                          /**< scan response data length */
+    uint8_t attach_appearance;                                          /**< flag to add appearance in scan response */
+    uint8_t attach_name;                                                        /**< flag to add device name in scan response */
+    uint8_t adv_phy;                                                                /**< advertising phy */
+    uint8_t  ex_adv_enable;                                                 /**< if ex-advertising enable */
+    uint8_t *ex_adv_p_data;                                                 /**< ex-advertising data pointer*/
+    uint8_t  ex_adv_data_len;                                               /**< ex-advertising data length */
+    uint8_t  beacon_enable;                                             /**< beacon mode without presence of AD_TYPE_FLAG in advertising data */
+
+    struct adv_time_t directed_adv;                                 /**< Direct Advertising parameters */
+    struct adv_time_t fast_adv;                                         /**< Fast Advertising parameters */
+    struct adv_time_t slow_adv;                                         /**< Slow Advertising parameters */
+};
+
+/**
+ * @brief Scan state for ble_scan_state_handler.
+ */
+enum scan_state_t
+{
+    SCAN_STATE_IDLE = 0,
+    SCAN_STATE_SCANING,
+    SCAN_STATE_FOUND,
+    SCAN_STATE_CONNECTING,
+    SCAN_STATE_CONN_TIMEOUT,
+    SCAN_STATE_INIT_IDLE,
+};
+
+/**
+ * @brief Scan filter type in APP.
+ */
+enum scan_filter_type
+{
+    SCAN_FILTER_DISABLE = 0,
+    SCAN_FILTER_BY_ADDRESS,
+    SCAN_FILTER_BY_NAME,
+    SCAN_FILTER_BY_UUID128,
+    SCAN_FILTER_BY_UUID16,
+    SCAN_FILTER_BY_APPEARANCE,
+
+    SCAN_FILTER_ALL,
+};
+
+/**
+ * @brief Scan environment structurein in Application.
+ */
+struct ns_scan_params_t
+{
+    uint8_t type;                                           /**< Scanning Type (@see enum gapm_scan_type) */
+    uint8_t scan_enable         : 1;  /**< if enable scan */
+    uint8_t connect_enable      : 1;  /**< if connect the device if match */
+    uint8_t phy_coded_enable    : 1;  /**< if use coded phy mode */
+    uint8_t prop_active_enable  : 1;    /**< Properties for the scan active mode, require response data */
+    uint8_t dup_filt_pol        : 2;    /**< Duplicate packet filtering policy */
+    uint16_t scan_intv;                             /**< Scan interval */
+    uint16_t scan_wd;                                   /**< Scan window */
+    ///  0 means that the controller will scan continuously until reception of a stop command from the application
+    uint16_t duration;                              /**< Scan duration (in unit of 10ms). */
+    ///  Time interval between two consequent starts of a scan duration by the controller. 0 means that the scan procedure is not periodic
+    uint16_t period;                                    /**< Scan period (in unit of 1.28s). */
+    uint32_t initiating_timeout;            /**< start init period for timeout  */
+
+    void (*ble_scan_state_handler)(enum scan_state_t);                                          /**< scan state callback function */
+    void (*ble_scan_data_handler)(struct gapm_ext_adv_report_ind const*);       /**< scan data callback function */
+
+    enum scan_filter_type filter_type;          /**< Filter type for taget device  */
+    const uint8_t         *filter_data;         /**< Filter data for taget device   */
+
+};
+
+/**
+ * @brief The BLE initialization environment structure in Application.
+ */
+struct ns_stack_cfg_t
+{
+    void (*ble_msg_handler)(struct ble_msg_t const *);  /**< ble msg hanlder */
+    void (*user_msg_handler)(ke_msg_id_t const, void const *);  /**< user msg handler */
+    ble_lsc_cfg_t lsc_cfg;  /**< The configuration of Low-speed clock type */
+};
+
+/**
+ * @brief The profile environment structure for Service.
+ */
+struct prf_task_t
+{
+    uint16_t prf_task_id;
+    struct app_subtask_handlers const *prf_task_handler;
+
+};
+
+/**
+ * @brief The profile list environment structure.
+ */
+struct ns_ble_prf_evn_t
+{
+    uint8_t prf_num;
+    struct prf_task_t prf_task_list[BLE_NB_PROFILES];
+};
+
+/**
+ * @brief The profile adding environment structure.
+ */
+struct ns_ble_add_prf_evn_t
+{
+    uint8_t prf_num;
+    ns_ble_add_prf_func_t add_prf_func_list[BLE_NB_PROFILES];
+};
+
+
+/**
+ * @brief Enumeration of TX/RX PHY values.
+ */
+enum ble_phy_val
+{
+    BLE_PHY_ANY          = GAP_PHY_ANY,             /**< No preferred PHY */
+    BLE_PHY_1MBPS        = GAP_PHY_LE_1MBPS,    /**< LE 1M PHY (TX or RX) */
+    BLE_PHY_2MBPS        = GAP_PHY_LE_2MBPS,    /**< LE 2M PHY (TX or RX) */
+    BLE_PHY_CODED        = GAP_PHY_LE_CODED,    /**< LE Coded PHY (RX Only) */
+    BLE_PHY_500KBPS      = GAP_PHY_LE_CODED | (GAPC_PHY_OPT_LE_CODED_500K_RATE << 4), /**< LE Coded PHY with S=8 data coding (TX Only) */
+    BLE_PHY_125KBPS      = GAP_PHY_LE_CODED | (GAPC_PHY_OPT_LE_CODED_125K_RATE << 4), /**< LE Coded PHY with S=2 data coding (TX Only) */
+};
+
+/* Public variables ---------------------------------------------------------*/
+/// Application environment
+extern struct app_env_tag           app_env;
+extern struct ns_gap_params_t       gap_env;
+extern struct ns_adv_params_t       adv_env;
+extern struct ns_scan_params_t      scan_env;
+extern struct ns_ble_prf_evn_t      ble_prf_evn;
+
+/* Public function prototypes -----------------------------------------------*/
+void llhwc_modem_setmode(uint8_t phy);
+bool ns_ble_add_svc(void);
+void ns_ble_adv_fsm_next(void);
+//General function for master and slave
+/**
+ *****************************************************************************************
+ * @brief Resolve the bonded peer device RPA address
+ *
+ * @param[in] irk:  Pointer to the peer IRK
+ * @param[in] nb_key:  number of IRK
+ * @param[in] addr:  peer RPA address
+ *****************************************************************************************
+ */
+void ns_ble_resolv_addr(struct gap_sec_key *irk, uint8_t nb_key, struct bd_addr* addr);
+
+/**
+ *****************************************************************************************
+ * @brief Set the resolving list
+ *
+ * @param[in] ral_list:  Pointer to RAL list
+ * @param[in] nb_key:  number of RAL
+ *****************************************************************************************
+ */
+void ns_ble_list_set_ral(struct gap_ral_dev_info *ral_list, uint8_t ral_cnt);
+
+/**
+ *****************************************************************************************
+ * @brief Set the White list
+ *
+ * @param[in] ral_list:  Pointer to White list
+ * @param[in] nb_key:  number of White list
+ *****************************************************************************************
+ */
+void ns_ble_list_set_wl(struct gap_bdaddr *wl_addr, uint8_t wl_cnt);
+
+/**
+ *****************************************************************************************
+ * @brief Set the data channel map
+ *
+ * @param[in] newchmap:  channel map configuration
+ *****************************************************************************************
+ */
+void ns_ble_set_channel_map(uint8_t* newchmap);
+
+/**
+ *****************************************************************************************
+ * @brief Set slave latency without connection parameters update
+ *
+ * @param[in] latency_cfg:  slave latency value
+ *****************************************************************************************
+ */
+void ns_ble_set_slave_latency(uint16_t latency_cfg);
+
+/**
+ *****************************************************************************************
+ * @brief Send to request to update the connection parameters
+ *
+ * @param[in] conn_param:  Pointer to connection parameters
+ *****************************************************************************************
+ */
+bool ns_ble_update_param(struct gapc_conn_param *conn_param);
+
+/**
+ *****************************************************************************************
+ * @brief Set ble mtu
+ *
+ * @param[in] mtu:  mtu value (23-517)
+ *****************************************************************************************
+ */
+void ns_ble_mtu_set(uint16_t mtu);
+
+/**
+ *****************************************************************************************
+ * @brief Set the BLE PHY
+ *
+ * @param[in] phy:  refer the enum ble_phy_val
+ *****************************************************************************************
+ */
+void ns_ble_phy_set(enum ble_phy_val phy);
+
+/**
+ * @brief master device get peer info
+ *  op:  GAPC_GET_PEER_FEATURES
+ *       GAPC_GET_PEER_VERSION
+ */
+
+void ns_ble_get_peer_info(uint8_t op);
+
+/**
+ *****************************************************************************************
+ * @brief set ble data length
+ *
+ * @param[in] tx_octets:  251
+ * @param[in] tx_time:  2120
+ *****************************************************************************************
+ */
+void ns_ble_dle_set(uint16_t tx_octets, uint16_t tx_time);
+
+/**
+ *****************************************************************************************
+ * @brief active get ble RSSI with an interval in ms. 0ms mean active one time only
+ *
+ * @param[in] interval:  repeat time in ms
+ *****************************************************************************************
+ */
+void ns_ble_active_rssi(uint32_t interval);
+
+/**
+ *****************************************************************************************
+ * @brief disconnect the connection (app_env.conidx)
+ *
+ *****************************************************************************************
+ */
+void ns_ble_disconnect(void);
+
+//stack and profile init function for master and slave
+uint32_t ns_calib_lsi_clk(void);
+void ns_ble_lsc_config(ble_lsc_cfg_t lsc_set);
+void ns_ble_reset(void);
+void ns_ble_stack_init(struct ns_stack_cfg_t const* p_handler);
+void ns_ble_gap_init(struct ns_gap_params_t const* p_dev_info);
+bool ns_ble_add_prf_func_register(ns_ble_add_prf_func_t func);
+bool ns_ble_prf_task_register(struct prf_task_t *prf);
+
+//function for slave role
+void ns_ble_adv_init(struct ns_adv_params_t const* p_adv_init);
+
+/**
+ *****************************************************************************************
+ * @brief start advertising
+ *
+ *****************************************************************************************
+ */
+void ns_ble_adv_start(void);
+
+/**
+ *****************************************************************************************
+ * @brief stop advertising
+ *
+ *****************************************************************************************
+ */
+void ns_ble_adv_stop(void);
+
+/**
+ *****************************************************************************************
+ * @brief update legacy advertising data
+ *
+ * @param[in] p_dat: advertising data with length-type-value pattern
+ * @param[in] len:  toatal length of p_dat
+ *****************************************************************************************
+ */
+bool ns_ble_adv_data_set(uint8_t* p_dat, uint16_t len);
+
+/**
+ *****************************************************************************************
+ * @brief update advertising scan response data
+ *
+ * @param[in] p_dat: scan response data with length-type-value pattern
+ * @param[in] len: toatal length of p_dat
+ *****************************************************************************************
+ */
+bool ns_ble_scan_rsp_data_set(uint8_t* p_dat, uint16_t len);
+
+/**
+ *****************************************************************************************
+ * @brief update extended advertising data
+ *
+ * @param[in] p_dat: advertising data with length-type-value pattern
+ * @param[in] len: toatal length of p_dat
+ *****************************************************************************************
+ */
+bool ns_ble_ex_adv_data_set(uint8_t* p_dat, uint16_t len);
+
+//function for master role
+void ns_ble_scan_init(struct ns_scan_params_t *p_init);
+
+/**
+ *****************************************************************************************
+ * @brief start scan
+ *
+ *****************************************************************************************
+ */
+void ns_ble_start_scan(void);
+
+/* Connected monitor opt-in; SDK command completion hooks also serve the port. */
+void ns_ble_scan_strict_enable(void);
+bool ns_ble_scan_transition_pending(void);
+bool ns_ble_adv_operation_pending(void);
+void ns_ble_adv_operation_complete(uint8_t operation);
+bool ns_ble_scan_defer_adv_stopped(void);
+void ns_ble_scan_strict_process(void);
+bool ns_ble_scan_strict_cmp(uint8_t operation, uint8_t status);
+bool ns_ble_scan_strict_stopped(uint8_t activity_index);
+
+/**
+ *****************************************************************************************
+ * @brief delete the scan activity after stop
+ *
+ *****************************************************************************************
+ */
+void ns_ble_delete_scan(void);
+
+/**
+ *****************************************************************************************
+ * @brief stop scan
+ *
+ *****************************************************************************************
+ */
+void ns_ble_stop_scan(void);
+
+/**
+ *****************************************************************************************
+ * @brief initiate the connection with target device mac address
+ *
+ * @param[in] addr:  mac address
+ * @param[in] addr_type:  mac address type (0: public, 1: random)
+ *****************************************************************************************
+ */
+void ns_ble_start_init(uint8_t *addr, uint8_t addr_type);
+
+/**
+ *****************************************************************************************
+ * @brief cancel the init of connection
+ *
+ *****************************************************************************************
+ */
+void ns_ble_stop_init(void);
+
+/* Retry a previously rejected INIT cleanup after an explicit cancellation. */
+void ns_ble_retry_init_cleanup(void);
+
+/**
+ *****************************************************************************************
+ * @brief delete the init activity after stop
+ *
+ *****************************************************************************************
+ */
+void ns_ble_delete_init(void);
+
+/**
+ *****************************************************************************************
+ * @brief check the target data from the scan data .
+ *
+ * @param[in] types:  target data type
+ * @param[in] p_filter_data:  target data
+ * @param[in] p_data:  scan data
+ * @param[in] len: scan data length
+ *****************************************************************************************
+ */
+bool ns_ble_scan_data_find(uint8_t types, const uint8_t *p_filter_data, uint8_t *p_data, uint8_t len);
+
+//function for multiconnection
+/**
+ *****************************************************************************************
+ * @brief Set the conidx of operation
+ *
+ * @param[in] conidx:  connection index
+ * @note Used before the operation of connection like set connection parameter,send data etc
+ *****************************************************************************************
+ */
+void    ns_ble_set_active_connection(uint8_t  conidx);
+
+/**
+ *****************************************************************************************
+ * @brief get the current active conidx
+ *
+ *****************************************************************************************
+ */
+uint8_t ns_ble_get_active_connection(void);
+
+/**
+ *****************************************************************************************
+ * @brief get the connection state of conidx
+ *
+ * @param[in] conidx:  connection index
+ *****************************************************************************************
+ */
+bool    ns_ble_get_connection_state(uint8_t conidx);
+
+/**
+ *****************************************************************************************
+ * @brief get total connection number
+ *
+ *****************************************************************************************
+ */
+uint8_t ns_ble_get_connection_num(void);
+
+/**
+ *****************************************************************************************
+ * @brief get master connection number
+ *
+ *****************************************************************************************
+ */
+uint8_t ns_ble_master_connection_num(void);
+/**
+ *****************************************************************************************
+ * @brief get slave connection number
+ *
+ *****************************************************************************************
+ */
+uint8_t ns_ble_slave_connection_num(void);
+
+/**
+ *****************************************************************************************
+ * @brief get the conidx by role (use at one master one slave example only)
+ *
+ * @param[in] role:  ROLE_MASTER or ROLE_SLAVE
+ *****************************************************************************************
+ */
+uint8_t ns_ble_get_conidx_by_role(uint8_t role);
+
+//function for RF,peripheral config
+/**
+ *****************************************************************************************
+ * @brief enter rf test mode
+ *
+ * @param[in] p_params:  le test parameters(refer struct gapm_le_test_mode_ctrl_cmd)
+ * @param[in] cw_mode:  true or false
+ *****************************************************************************************
+ */
+void ns_ble_prod_test_cmd_send(struct gapm_le_test_mode_ctrl_cmd *p_params, bool cw_mode);
+
+/**
+ *****************************************************************************************
+ * @brief  set the radio fact frequency to calibrate it.
+ * @param  fact_freq: the fact frequency test in CW mode, uint is Hz.
+ * @param  std_freq: the standard frequency shoud get in CW mode.
+ * @return void
+ * @note   for example: you can use RFTest example to test the CW in 0 channel,
+ *         it should be 2402000000 Hz, but we get 2401950000, it meam it offset 50k Hz.
+ *         We can call the function: ns_ble_radio_calibration(2401950000, 2402000000);
+ *****************************************************************************************
+ */
+void ns_ble_radio_calibration(uint32_t fact_freq, uint32_t std_freq);
+
+/**
+ *****************************************************************************************
+ * @brief  set the radio tx power.
+ * @param  tx_pwr: the power value to set, it can be set as below.
+            TX_POWER_0_DBM
+            TX_POWER_Neg2_DBM
+            TX_POWER_Neg4_DBM
+            TX_POWER_Neg8_DBM
+            TX_POWER_Neg15_DBM
+            TX_POWER_Neg20_DBM
+            TX_POWER_Pos2_DBM
+            TX_POWER_Pos3_DBM
+            TX_POWER_Pos4_DBM
+            TX_POWER_Pos6_DBM
+ *****************************************************************************************
+ */
+void ns_ble_radio_power_set(rf_tx_power_t tx_pwr);
+
+/**
+ *****************************************************************************************
+ * @brief  Config the lsc etc peripheral
+ *
+ *****************************************************************************************
+ */
+void ns_peripheral_config(void);
+
+/**
+ *****************************************************************************************
+ * @brief flash write interface using the rom api for data size more than page
+ * @note  just for  ble project
+ *
+ *****************************************************************************************
+ */
+ReturnMsg CMD_FLASH_WRITE(uint32_t addr, uint8_t* p_data, uint32_t len);
+
+/// @} APP
+
+#endif //(BLE_APP_PRESENT)
+
+#endif // _NS_BLE_H_

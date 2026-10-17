@@ -1,0 +1,2 @@
+/* Legacy hardware-specific log backend retired.
+ * Log output is implemented by Project/src/log.c over char_device_t. */

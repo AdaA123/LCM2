@@ -1,0 +1,41 @@
+#ifndef __MYTASK_H
+#define __MYTASK_H
+
+#include <stdint.h>
+
+#define TASK_NUM       64
+typedef enum
+{
+    TASK_CYCKE_1mS = 1,
+    TASK_CYCKE_2mS = 2,
+    TASK_CYCKE_10mS = 10,
+    TASK_CYCKE_50mS = 50,
+    TASK_CYCKE_100mS = 100,
+    TASK_CYCKE_500mS = 500,
+    TASK_CYCKE_1000mS = 1000,
+    TASK_CYCKE_5000mS = 5000,
+} TASK_CYCKE;
+
+typedef struct
+{
+    unsigned int Time;
+    void (*fun[TASK_NUM])(void);
+    unsigned short Count[TASK_NUM];
+    unsigned short Number;
+    void (*ActionTypeTask)(void);
+} TaskType;
+
+extern TaskType Task;
+
+void TaskInit(void (*fun)(void));    //?????
+void TaskStart(void);                           //???????
+void TaskRun(void); //?????????
+unsigned char TaskDelete(void (*fun)(void));          //???????
+unsigned char TaskAdd(unsigned int time, void (*fun)(void)); //????????
+unsigned short TaskFind(void (*fun)(void));
+void TaskTimeAdd(void);
+uint32_t TaskGetTick(void);            //????????????????(??????)
+#endif
+
+
+

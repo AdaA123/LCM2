@@ -1,0 +1,207 @@
+/**
+*     Copyright (c) 2026, Nsing Technologies Inc.
+*
+*     All rights reserved.
+*
+*     This software is the exclusive property of Nsing Technologies Inc. (Hereinafter
+* referred to as Nsing). This software, and the product of Nsing described herein
+* (Hereinafter referred to as the Product) are owned by Nsing under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     Nsing does not grant any license under its patents, copyrights, trademarks, or other
+* intellectual property rights. Names and brands of third party may be mentioned or referred
+* thereto (if any) for identification purposes only.
+*
+*     Nsing reserves the right to make changes, corrections, enhancements, modifications, and
+* improvements to this software at any time without notice. Please contact Nsing and obtain
+* the latest version of this software before placing orders.
+
+*     Although Nsing has attempted to provide accurate and reliable information, Nsing assumes
+* no responsibility for the accuracy and reliability of this software.
+*
+*     It is the responsibility of the user of this software to properly design, program, and test
+* the functionality and safety of any application made of this information and any resulting product.
+* In no event shall Nsing be liable for any direct, indirect, incidental, special,exemplary, or
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     Nsing Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify Nsing and hold Nsing
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by Nsing, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     Nsing products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations.
+* User shall comply with any applicable export control laws and regulations promulgated and administered by
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+
+/**
+*\*\file n32wb033_pwr.c
+*\*\author Nsing
+*\*\version v1.0.0
+*\*\copyright Copyright (c) 2026, Nsing Technologies Inc. All rights reserved.
+ */
+#include "n32wb033_pwr.h"
+#include "n32wb033_rcc.h"
+
+/** PWR Driving Functions Declaration **/
+
+
+/**
+*\*\name    PWR_DeInit.
+*\*\fun     Deinitializes the PWR peripheral registers to their default reset values.
+*\*\param   none
+*\*\return  none
+**/
+void PWR_DeInit(void)
+{
+    RCC_EnableAPB1PeriphReset(RCC_APB1_PERIPH_PWR);
+}
+
+/**
+*\*\name    PWR_EnterIDLEMode.
+*\*\fun     Enters IDLE mode.
+*\*\param   IDLEONEXIT :
+*\*\          - DISABLE    SLEEP mode with SLEEPONEXIT disable
+*\*\          - ENABLE     SLEEP mode with SLEEPONEXIT enable
+*\*\param   PWR_IDLEEntry :
+*\*\          - PWR_IDLEENTRY_WFI    enter IDLE mode with WFI instruction
+*\*\          - PWR_IDLEENTRY_WFE    enter IDLE mode with WFE instruction
+*\*\return  none
+**/
+void PWR_EnterIDLEMode(uint8_t IDLEONEXIT, uint8_t PWR_IDLEEntry)
+{
+
+    /* CLEAR SLEEPDEEP bit of Cortex System Control Register */
+    SCB->SCR &= (uint32_t)~((uint32_t)SCB_SCR_SLEEPDEEP);
+
+      /* Select SLEEPONEXIT mode entry --------------------------------------------------*/
+    if (IDLEONEXIT == (uint8_t)ENABLE)
+    {
+        /* the MCU enters Sleep mode as soon as it exits the lowest priority ISR */
+        SCB->SCR |= SCB_SCR_SLEEPONEXIT;
+    }
+    else if (IDLEONEXIT == (uint8_t)DISABLE)
+    {
+        /* Sleep-now */
+        SCB->SCR &= (uint32_t)~((uint32_t)SCB_SCR_SLEEPONEXIT);
+    }
+    else
+    {
+    	/* No Process */
+    }
+
+    /* Select SLEEP mode entry --------------------------------------------------*/
+    if (PWR_IDLEEntry == PWR_IDLEENTRY_WFI)
+    {
+        /* Request Wait For Interrupt */
+        __WFI();
+    }
+    else
+    {
+        /* Request Wait For Event */
+        __SEV();
+        __WFE();
+        __WFE();
+    }
+}
+
+/**
+*\*\name    PWR_EnterSLEEPMode.
+*\*\fun     Enters SLEEP mode.
+*\*\param   PWR_SleepEntry :
+*\*\          - PWR_SLEEPENTRY_WFI    enter SLEEP mode with WFI instruction
+*\*\          - PWR_SLEEPENTRY_WFE    enter SLEEP mode with WFE instruction
+*\*\return  none
+**/
+ void PWR_EnterSLEEPMode(uint8_t PWR_SleepEntry)
+{
+    uint32_t tmpreg = 0U;
+    /* Set BLE modem sleep */
+//    *(volatile uint32_t*)(uintptr_t)0x40011804U |= 0x40U; /* enable this config for without HSE */
+    *(volatile uint32_t*)(uintptr_t)(BASEBAND_REG_BASE + 0x30U) = 0x07U;
+    while ((PWR->CTRL1 & PWR_CTRL1_BLE_OSC_EN) == PWR_CTRL1_BLE_OSC_EN)
+    {
+        /* wait for BLE oscillator to be disabled */
+    }
+
+    /* Select the regulator state in SLEEP mode ---------------------------------*/
+    tmpreg = PWR->CTRL1;
+    /* Clear PWR_MODE and PWR_MODE_EN bits */
+    tmpreg &= ~(PWR_CTRL1_PWR_MODE|PWR_CTRL1_PWR_MODE_EN);
+    /* Set PWR_MODE and PWR_MODE_EN bit */
+    tmpreg |= (PWR_CTRL1_PWR_MODE_SLEEP | PWR_CTRL1_PWR_MODE_EN);
+    /* Store the new value */
+    PWR->CTRL1 = tmpreg;
+    /* Set SLEEPDEEP bit of Cortex System Control Register */
+    SCB->SCR |= SCB_SCR_SLEEPDEEP;
+
+    /* Select SLEEP mode entry --------------------------------------------------*/
+    if (PWR_SleepEntry == PWR_SLEEPENTRY_WFI)
+    {
+        /* Request Wait For Interrupt */
+        __WFI();
+    }
+    else
+    {
+        /* Request Wait For Event */
+        __SEV();
+        __WFE();
+        __WFE();
+    }
+
+    /* Reset SLEEPDEEP bit of Cortex System Control Register */
+    SCB->SCR &= (uint32_t)~((uint32_t)SCB_SCR_SLEEPDEEP);
+}
+
+/**
+*\*\name    PWR_EnableSleepIwdgFrozen
+*\*\fun     Freeze the IWDG counter in Sleep mode.
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void PWR_EnableSleepIwdgFrozen(FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        PWR->IWDG_CTRL &= (~PWR_IWDG_CTRL_SLEEP_FRZ);
+    }
+    else
+    {
+        PWR->IWDG_CTRL |= PWR_IWDG_CTRL_SLEEP_FRZ;
+    }
+}
+
+/**
+*\*\name    PWR_EnableIdleIwdgFrozen
+*\*\fun     Freeze the IWDG counter in Idle mode.
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void PWR_EnableIdleIwdgFrozen(FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        PWR->IWDG_CTRL &= (~PWR_IWDG_CTRL_IDLE_FRZ);
+    }
+    else
+    {
+        PWR->IWDG_CTRL |= PWR_IWDG_CTRL_IDLE_FRZ;
+    }
+}
+

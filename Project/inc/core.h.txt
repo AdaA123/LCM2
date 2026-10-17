@@ -1,0 +1,82 @@
+#ifndef CHAR_DEV_CORE_H
+#define CHAR_DEV_CORE_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define CHAR_DEV_OK          0
+#define CHAR_DEV_ERR_PARAM  (-1)
+#define CHAR_DEV_ERR_STATE  (-2)
+#define CHAR_DEV_ERR_BUSY   (-3)
+
+#define CHAR_DEVICE_INITIALIZER {0}
+
+#define CHAR_DEV_OFLAG_RDONLY 0x0001u
+#define CHAR_DEV_OFLAG_WRONLY 0x0002u
+#define CHAR_DEV_OFLAG_RDWR   0x0003u
+#define CHAR_DEV_OFLAG_MASK   0x0003u
+
+typedef enum {
+    CHAR_DEV_STATE_UNREGISTERED = 0,
+    CHAR_DEV_STATE_REGISTERED,
+    CHAR_DEV_STATE_INITIALIZED,
+    CHAR_DEV_STATE_OPEN,
+    CHAR_DEV_STATE_ERROR
+} state_t;
+
+struct device;
+
+typedef void (*rx_indicate_t)(struct device *dev,
+                                       uint32_t size);
+typedef void (*tx_complete_t)(struct device *dev,
+                                       const void *buffer);
+
+typedef struct 
+{
+    int (*init)(struct device *dev);
+    int (*open)(struct device *dev, uint16_t oflag);
+    int (*close)(struct device *dev);
+    int (*read)(struct device *dev, uint32_t pos,
+                void *buffer, uint32_t size);
+    int (*write)(struct device *dev, uint32_t pos,
+                 const void *buffer, uint32_t size);
+    int (*control)(struct device *dev, int cmd, void *arg);
+} ops_t;
+
+typedef struct device 
+{
+    const ops_t *ops;
+    void                 *user_data;
+    rx_indicate_t rx_indicate;
+    tx_complete_t tx_complete;
+    uint16_t              open_flag;
+    uint8_t               state;
+} device_t;
+
+/**
+ * @brief Register a statically allocated character device object.
+ * @note  Before its first registration, dev must be zero-initialized by
+ *        static storage duration or with CHAR_DEVICE_INITIALIZER.
+ */
+int Register(device_t *dev, const ops_t *ops, void *user_data);
+int rx_indicate_set(device_t *dev, rx_indicate_t callback);
+int tx_complete_set(device_t *dev, tx_complete_t callback);
+
+int init(device_t *dev);
+int open(device_t *dev, uint16_t oflag);
+int close(device_t *dev);
+int read(device_t *dev, uint32_t pos, void *buffer, uint32_t size);
+int write(device_t *dev, uint32_t pos, const void *buffer, uint32_t size);
+int control(device_t *dev, int cmd, void *arg);
+
+int rx_indicate(device_t *dev, uint32_t size);
+int tx_complete(device_t *dev, const void *buffer);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* CHAR_DEV_CORE_H */

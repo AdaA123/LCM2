@@ -1,0 +1,156 @@
+#include "ringbuffer.h"
+#include <string.h>
+
+uint8_t RingBuf_IsValid(const sys_ringbuf_t *rb)
+{
+    return (uint8_t)((rb != 0) && (rb->buffer != 0) &&
+                     (rb->capacity >= 2u) &&
+                     (rb->head < rb->capacity) &&
+                     (rb->tail < rb->capacity));
+}
+
+/** @brief 占用量 = 回绕安全计算 (对外查询接口) */
+uint16_t RingBuf_Count(const sys_ringbuf_t *rb)
+{
+    uint16_t head;
+    uint16_t tail;
+
+    if(RingBuf_IsValid(rb) == 0u)
+        return 0u;
+
+    head = rb->head;
+    tail = rb->tail;
+    return (head >= tail) ? (uint16_t)(head - tail) : (uint16_t)(rb->capacity - tail + head);
+}
+
+uint16_t RingBuf_Space(const sys_ringbuf_t *rb)
+{
+    if(RingBuf_IsValid(rb) == 0u)
+        return 0u;
+
+    return (uint16_t)(rb->capacity - 1u - RingBuf_Count(rb));
+}
+
+/** @brief 初始化: 挂载缓冲区并清零指针 */
+void RingBuf_Init(sys_ringbuf_t *rb, uint8_t *buffer, uint16_t capacity)
+{
+    if(rb == 0)
+        return;
+
+    rb->buffer   = ((buffer != 0) && (capacity >= 2u)) ? buffer : 0;
+    rb->capacity = ((buffer != 0) && (capacity >= 2u)) ? capacity : 0u;
+    rb->head     = 0u;
+    rb->tail     = 0u;
+}
+
+/**
+ * @brief  入队 (生产者侧: 只推进 head)
+ * @param  rb    目标环形缓冲
+ * @param  data  待写入数据
+ * @param  len   期望写入长度
+ * @return 实际写入字节数 (空间不足时截断, 丢包由调用方计数)
+ * @note   按"尾段连续/回绕绕头"两段拷贝; 满即拒写 (留一空槽判满),
+ *         保证既有数据顺序不被覆盖。
+ */
+uint16_t RingBuf_Push(sys_ringbuf_t *rb, const uint8_t *data, uint16_t len)
+{
+    uint16_t room;
+    uint16_t n;
+    uint16_t first;
+    uint32_t next;
+
+    if((RingBuf_IsValid(rb) == 0u) || (data == 0) || (len == 0u))
+        return 0u;
+
+    room = RingBuf_Space(rb);
+    n = (len <= room) ? len : room;
+
+    if(n == 0u)
+        return 0u;
+
+    first = (uint16_t)(rb->capacity - rb->head);
+
+    if(first > n)
+        first = n;
+
+    memcpy(&rb->buffer[rb->head], data, first);
+
+    if(n > first)
+        memcpy(rb->buffer, &data[first], (uint16_t)(n - first));
+
+    next = (uint32_t)(rb->head + n);
+    rb->head = (next >= rb->capacity) ? (uint16_t)(next - rb->capacity) : next;
+    return n;
+}
+
+/**
+ * @brief  出队 (消费者侧: 只推进 tail)
+ * @return 实际读出字节数 (缓冲空时返回 0)
+ * @note   与 RingBuf_Push 对偶: 分"尾段连续/回绕"两段拷贝, 只消费已
+ *         写入的数据量 (cnt 与 len 取小), 天然不会越过生产者指针。
+ */
+uint16_t RingBuf_Pop(sys_ringbuf_t *rb, uint8_t *out, uint16_t len)
+{
+    uint16_t n;
+
+    if((RingBuf_IsValid(rb) == 0u) || (out == 0) || (len == 0u))
+        return 0u;
+
+    n = RingBuf_Peek(rb, out, len);
+    (void)RingBuf_Discard(rb, n);
+    return n;
+}
+
+uint16_t RingBuf_Peek(const sys_ringbuf_t *rb, uint8_t *out, uint16_t len)
+{
+    uint16_t count;
+    uint16_t n;
+    uint16_t first;
+
+    if((RingBuf_IsValid(rb) == 0u) || (out == 0) || (len == 0u))
+        return 0u;
+
+    count = RingBuf_Count(rb);
+    n = (len <= count) ? len : count;
+
+    if(n == 0u)
+        return 0u;
+
+    first = (uint16_t)(rb->capacity - rb->tail);
+
+    if(first > n)
+        first = n;
+
+    memcpy(out, &rb->buffer[rb->tail], first);
+
+    if(n > first)
+        memcpy(&out[first], rb->buffer, (uint16_t)(n - first));
+
+    return n;
+}
+
+uint16_t RingBuf_Discard(sys_ringbuf_t *rb, uint16_t len)
+{
+    uint16_t count;
+    uint16_t n;
+    uint32_t next;
+
+    if((RingBuf_IsValid(rb) == 0u) || (len == 0u))
+        return 0u;
+
+    count = RingBuf_Count(rb);
+    n = (len <= count) ? len : count;
+    next = (uint32_t)(rb->tail + n);
+    rb->tail = (next >= rb->capacity) ? (uint16_t)(next - rb->capacity) : next;
+    return n;
+}
+
+/** @brief 缓冲复位: 读写指针清零即作废全部数据 (建链/断链/挂载时调用) */
+void RingBuf_Reset(sys_ringbuf_t *rb)
+{
+    if(rb == 0)
+        return;
+
+    rb->head = 0u;
+    rb->tail = 0u;
+}

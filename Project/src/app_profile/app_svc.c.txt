@@ -1,0 +1,578 @@
+#include "app_svc.h"
+
+#include "rwip_config.h"
+#include "attm.h"
+#include "attm_db.h"
+#include "att.h"
+#include "gattc_task.h"
+#include "gapm_task.h"
+#include "prf.h"
+#include "prf_types.h"
+#include "co_utils.h"
+#include "ke_task.h"
+#include "ke_mem.h"
+#include "ns_ble.h"
+#include "ns_log.h"
+#include "ble_port_rw.h"
+
+#include <string.h>
+
+
+/* ========================================================================== */
+/*  Constants                                                                  */
+/* ========================================================================== */
+
+#define APP_SVC_MAX_CONN               APP_CON_IDX_MAX//最大连接数量
+#define SVC180A_NB_ATT                 7u
+#define SVC5453_NB_ATT                 6u
+#define APP_SVC_CMD_HEADER_LEN         4u
+#define APP_SVC_CMD_DATA_MAX           247u
+#define APP_SVC_DEFAULT_ATT_MTU        23u
+#define APP_SVC_ATT_PDU_OVERHEAD       3u
+#define APP_SVC_ATT_ERR_NO_RESOURCE    0x11u
+
+enum
+{
+    SVC180A_IDX_SVC = 0,
+
+    SVC180A_IDX_MODEL_CHAR,
+    SVC180A_IDX_MODEL_VAL,
+
+    SVC180A_IDX_MFR_CHAR,
+    SVC180A_IDX_MFR_VAL,
+
+    SVC180A_IDX_SW_CHAR,
+    SVC180A_IDX_SW_VAL,
+};
+
+enum
+{
+    SVC5453_IDX_SVC = 0,
+
+    SVC5453_IDX_5401_CHAR,
+    SVC5453_IDX_5401_VAL,
+
+    SVC5453_IDX_5400_CHAR,
+    SVC5453_IDX_5400_VAL,
+    SVC5453_IDX_5400_CFG,
+};
+
+enum
+{
+    APP_SVC_IDLE = 0,
+    APP_SVC_BUSY,
+
+    APP_SVC_STATE_MAX,
+};
+
+typedef struct
+{
+    prf_env_t prf_env;
+    uint16_t shdl_180a;
+    uint16_t shdl_5453;
+    ke_state_t state[1];
+} app_svc_env_t;
+
+static bool s_ccc_ind[APP_SVC_MAX_CONN];
+static bool s_ind_busy[APP_SVC_MAX_CONN];
+static const struct attm_desc svc180a_att_db[SVC180A_NB_ATT] =
+{
+    [SVC180A_IDX_SVC] =
+    {
+        ATT_DECL_PRIMARY_SERVICE,
+        PERM(RD, ENABLE),
+        0,
+        0
+    },
+
+    [SVC180A_IDX_MODEL_CHAR] =
+    {
+        ATT_DECL_CHARACTERISTIC,
+        PERM(RD, ENABLE),
+        0,
+        0
+    },
+
+    [SVC180A_IDX_MODEL_VAL] =
+    {
+        ATT_CHAR_MODEL_NB,
+        PERM(RD, ENABLE),
+        PERM(RI, ENABLE),
+        32
+    },
+
+    [SVC180A_IDX_MFR_CHAR] =
+    {
+        ATT_DECL_CHARACTERISTIC,
+        PERM(RD, ENABLE),
+        0,
+        0
+    },
+
+    [SVC180A_IDX_MFR_VAL] =
+    {
+        ATT_CHAR_MANUF_NAME,
+        PERM(RD, ENABLE),
+        PERM(RI, ENABLE),
+        32
+    },
+
+    [SVC180A_IDX_SW_CHAR] =
+    {
+        ATT_DECL_CHARACTERISTIC,
+        PERM(RD, ENABLE),
+        0,
+        0
+    },
+
+    [SVC180A_IDX_SW_VAL] =
+    {
+        ATT_CHAR_SW_REV,
+        PERM(RD, ENABLE),
+        PERM(RI, ENABLE),
+        32
+    },
+};
+
+static const uint8_t svc5453_uuid[16] = APP_SVC_5453_UUID_128;//00005453-0000-1000-8000-00805F9B34FB
+static const struct attm_desc_128 svc5453_att_db[SVC5453_NB_ATT] =
+{
+    [SVC5453_IDX_SVC] =
+    {
+        {0x00, 0x28},
+        PERM(RD, ENABLE),
+        0,
+        0
+    },
+    [SVC5453_IDX_5401_CHAR] =
+    {
+        {0x03, 0x28},
+        PERM(RD, ENABLE),
+        0,
+        0
+    },
+    [SVC5453_IDX_5401_VAL] =
+    {
+        APP_SVC_5401_UUID_128,
+
+        PERM(RD, ENABLE) |
+        PERM(WRITE_COMMAND, ENABLE),
+
+        PERM(RI, ENABLE) |
+        PERM_VAL(UUID_LEN, 0x02),
+
+        20
+    },
+    [SVC5453_IDX_5400_CHAR] =
+    {
+        {0x03, 0x28},
+        PERM(RD, ENABLE),
+        0,
+        0
+    },
+    [SVC5453_IDX_5400_VAL] =
+    {
+        APP_SVC_5400_UUID_128,
+
+        PERM(WRITE_REQ, ENABLE) |
+        PERM(IND, ENABLE),
+
+        PERM(RI, ENABLE) |
+        PERM_VAL(UUID_LEN, 0x02),
+
+        0x200
+    },
+    [SVC5453_IDX_5400_CFG] =
+    {
+        {0x02, 0x29},
+
+        PERM(RD, ENABLE) |
+        PERM(WRITE_REQ, ENABLE),
+
+        PERM(RI, ENABLE),
+
+        sizeof(uint16_t)
+    },
+};
+
+static app_svc_env_t *app_svc_env_get(void)
+{
+    return (app_svc_env_t *)prf_env_get(TASK_ID_APP_SVC);
+}
+
+static bool app_svc_any_ind_busy(void)
+{
+    uint8_t i;
+
+    for (i = 0u; i < APP_SVC_MAX_CONN; i++)
+    {
+        if (s_ind_busy[i])return true;
+    }
+
+    return false;
+}
+
+static void app_svc_state_refresh(ke_task_id_t task_id)
+{
+    if (app_svc_any_ind_busy())ke_state_set(task_id, APP_SVC_BUSY);
+    else ke_state_set(task_id, APP_SVC_IDLE);
+}
+
+static uint16_t app_svc_att_mtu_get(uint8_t conidx)
+{
+    uint16_t mtu;
+    mtu = APP_SVC_DEFAULT_ATT_MTU;
+
+    if (conidx < APP_SVC_MAX_CONN)
+        if (app_env.conn_env[conidx].max_mtu >= APP_SVC_DEFAULT_ATT_MTU)
+            mtu = app_env.conn_env[conidx].max_mtu;
+
+    return mtu;
+}
+
+static uint16_t app_svc_cmd_payload_max(uint8_t conidx)
+{
+    uint16_t mtu;
+    uint16_t max_len;
+    mtu = app_svc_att_mtu_get(conidx);
+
+    if (mtu <= (APP_SVC_ATT_PDU_OVERHEAD + APP_SVC_CMD_HEADER_LEN))return 0u;
+
+    max_len = (uint16_t)(mtu - APP_SVC_ATT_PDU_OVERHEAD - APP_SVC_CMD_HEADER_LEN);
+
+    if (max_len > APP_SVC_CMD_DATA_MAX)max_len = APP_SVC_CMD_DATA_MAX;
+
+    return max_len;
+}
+
+static int app_svc_read_req_ind_handler(ke_msg_id_t const msgid, struct gattc_read_req_ind const *p, ke_task_id_t const dest_id, ke_task_id_t const src_id)
+{
+    app_svc_env_t *env;
+    const uint8_t *value;
+    uint16_t length;
+    uint8_t status;
+    struct gattc_read_cfm *cfm;
+    static const uint8_t control_state = 0u;
+    (void)msgid;
+    env    = app_svc_env_get();
+    value  = NULL;
+    length = 0u;
+    status = ATT_ERR_NO_ERROR;
+
+    if ((env == NULL) || (p == NULL))
+        status = ATT_ERR_ATTRIBUTE_NOT_FOUND;
+    else if (p->handle == (uint16_t)(env->shdl_180a + SVC180A_IDX_MODEL_VAL))
+    {
+        value  = (const uint8_t *)APP_SVC_MODEL_STR;
+        length = (uint16_t)strlen(APP_SVC_MODEL_STR);
+    }
+    else if (p->handle == (uint16_t)(env->shdl_180a + SVC180A_IDX_MFR_VAL))
+    {
+        value  = (const uint8_t *)APP_SVC_MFR_STR;
+        length = (uint16_t)strlen(APP_SVC_MFR_STR);
+    }
+    else if (p->handle == (uint16_t)(env->shdl_180a + SVC180A_IDX_SW_VAL))
+    {
+        value  = (const uint8_t *)APP_SVC_SWREV_STR;
+        length = (uint16_t)strlen(APP_SVC_SWREV_STR);
+    }
+    else if (p->handle == (uint16_t)(env->shdl_5453 + SVC5453_IDX_5401_VAL))
+    {
+        value  = &control_state;
+        length = 1u;
+    }
+    else
+        status = ATT_ERR_ATTRIBUTE_NOT_FOUND;
+
+    cfm = KE_MSG_ALLOC_DYN(GATTC_READ_CFM, src_id, dest_id, gattc_read_cfm, length);
+    cfm->handle = p->handle;
+    cfm->status = status;
+    cfm->length = length;
+
+    if ((value != NULL) && (length > 0u))memcpy(&cfm->value[0], value, length);
+
+    ke_msg_send(cfm);
+    return KE_MSG_CONSUMED;
+}
+
+static int app_svc_write_req_ind_handler(ke_msg_id_t const msgid, struct gattc_write_req_ind const *p, ke_task_id_t const dest_id, ke_task_id_t const src_id)
+{
+    app_svc_env_t *env;
+    uint8_t status;
+    uint8_t conidx;
+    uint16_t cfg;
+    struct gattc_write_cfm *cfm;
+    (void)msgid;
+    env    = app_svc_env_get();
+    status = ATT_ERR_NO_ERROR;
+    conidx = KE_IDX_GET(src_id);
+
+    if ((env == NULL) || (p == NULL))status = ATT_ERR_ATTRIBUTE_NOT_FOUND;
+    else if (p->offset != 0u)status = ATT_ERR_ATTRIBUTE_NOT_FOUND;
+    else if (p->handle == (uint16_t)(env->shdl_5453 + SVC5453_IDX_5401_VAL))
+    {
+        if ((p->value != NULL) && (p->length > 0u)) ble_port_control_rx(p->value, p->length);
+    }
+    else if (p->handle == (uint16_t)(env->shdl_5453 + SVC5453_IDX_5400_CFG))
+    {
+        if ((p->length == 2u) && (conidx < APP_SVC_MAX_CONN))
+        {
+            cfg = (uint16_t)p->value[0] | ((uint16_t)p->value[1] << 8);
+
+            if (cfg == PRF_CLI_START_IND)s_ccc_ind[conidx] = true;
+            else s_ccc_ind[conidx] = false;
+
+            NS_LOG_INFO("[APP_SVC] 5400 CCCD conidx=%u -> %s\r\n", (unsigned)conidx, s_ccc_ind[conidx] ? "IND ENABLED" : "DISABLED");
+        }
+        else
+            NS_LOG_WARNING("[APP_SVC] 5400 CCCD invalid write ""(conidx=%u len=%u)\r\n", (unsigned)conidx, (unsigned)p->length);
+    }
+    else if (p->handle == (uint16_t)(env->shdl_5453 + SVC5453_IDX_5400_VAL))
+        NS_LOG_WARNING("[APP_SVC] write to 5400 ignored ""(conidx=%u len=%u)\r\n", (unsigned)conidx, (unsigned)p->length);
+    else
+        status = ATT_ERR_ATTRIBUTE_NOT_FOUND;
+
+    cfm = KE_MSG_ALLOC(GATTC_WRITE_CFM, src_id, dest_id, gattc_write_cfm);
+    cfm->handle = p->handle;
+    cfm->status = status;
+    ke_msg_send(cfm);
+    return KE_MSG_CONSUMED;
+}
+
+
+static int app_svc_cmp_evt_handler(ke_msg_id_t const msgid, struct gattc_cmp_evt const *p, ke_task_id_t const dest_id, ke_task_id_t const src_id)
+{
+    uint8_t conidx;
+    (void)msgid;
+
+    if (p == NULL)return KE_MSG_CONSUMED;
+
+    if (p->operation != GATTC_INDICATE)return KE_MSG_CONSUMED;
+
+    conidx = KE_IDX_GET(src_id);
+
+    if (conidx < APP_SVC_MAX_CONN) s_ind_busy[conidx] = false;
+
+    if (p->status != ATT_ERR_NO_ERROR)
+        NS_LOG_WARNING("[APP_SVC] Indicate CFM ""conidx=%u status=0x%02X\r\n", (unsigned)conidx, (unsigned)p->status);
+    else
+        NS_LOG_DEBUG("[APP_SVC] Indicate CFM OK conidx=%u\r\n", (unsigned)conidx);
+
+    app_svc_state_refresh(dest_id);
+    return KE_MSG_CONSUMED;
+}
+
+static const struct ke_msg_handler app_svc_msg_handler_tab[] =
+{
+    {
+        GATTC_READ_REQ_IND,
+        (ke_msg_func_t)app_svc_read_req_ind_handler
+    },
+
+    {
+        GATTC_WRITE_REQ_IND,
+        (ke_msg_func_t)app_svc_write_req_ind_handler
+    },
+
+    {
+        GATTC_CMP_EVT,
+        (ke_msg_func_t)app_svc_cmp_evt_handler
+    },
+};
+
+
+static void app_svc_task_init(struct ke_task_desc *task_desc, app_svc_env_t *env)
+{
+    task_desc->msg_handler_tab = app_svc_msg_handler_tab;
+    task_desc->msg_cnt = ARRAY_LEN(app_svc_msg_handler_tab);
+    task_desc->state = env->state;
+    task_desc->idx_max = 1u;
+}
+
+static uint8_t app_svc_init(struct prf_task_env *p_env, uint16_t *p_start_hdl, uint16_t app_task, uint8_t sec_lvl, void *params)
+{
+    uint32_t cfg;
+    uint8_t status;
+    uint16_t shdl_180a;
+    uint16_t shdl_5453;
+    app_svc_env_t *env;
+    (void)params;
+
+    if ((p_env == NULL) || (p_start_hdl == NULL))return APP_SVC_ATT_ERR_NO_RESOURCE;
+
+    env = (app_svc_env_t *)ke_malloc(sizeof(app_svc_env_t), KE_MEM_ATT_DB);
+
+    if (env == NULL) return APP_SVC_ATT_ERR_NO_RESOURCE;
+
+    memset(env, 0, sizeof(*env));
+    shdl_180a = *p_start_hdl;
+    cfg = (1u << SVC180A_NB_ATT) - 1u;
+    status = attm_svc_create_db(&shdl_180a, ATT_SVC_DEVICE_INFO, (uint8_t *)&cfg, SVC180A_NB_ATT, NULL, p_env->task, &svc180a_att_db[0], (sec_lvl & (PERM_MASK_SVC_DIS | PERM_MASK_SVC_AUTH | PERM_MASK_SVC_EKS)));
+
+    if (status != ATT_ERR_NO_ERROR)
+    {
+        ke_free(env);
+        return status;
+    }
+
+    *p_start_hdl = shdl_180a;
+    shdl_5453 = 0u;
+    cfg = (1u << SVC5453_NB_ATT) - 1u;
+    status = attm_svc_create_db_128(&shdl_5453, svc5453_uuid, (uint8_t *)&cfg, SVC5453_NB_ATT, NULL, p_env->task, &svc5453_att_db[0], (sec_lvl & (PERM_MASK_SVC_DIS | PERM_MASK_SVC_AUTH | PERM_MASK_SVC_EKS)) | PERM(SVC_SECONDARY, DISABLE));
+
+    if (status != ATT_ERR_NO_ERROR)
+    {
+        ke_free(env);
+        return status;
+    }
+
+    env->shdl_180a = shdl_180a;
+    env->shdl_5453 = shdl_5453;
+    env->prf_env.app_task = app_task | PERM(PRF_MI, DISABLE);
+    env->prf_env.prf_task = p_env->task | PERM(PRF_MI, DISABLE);
+    p_env->env = (prf_env_t *)env;
+    p_env->id = TASK_ID_APP_SVC;
+    app_svc_task_init(&p_env->desc, env);
+    ke_state_set(p_env->task, APP_SVC_IDLE);
+    memset(s_ccc_ind, 0, sizeof(s_ccc_ind));
+    memset(s_ind_busy, 0, sizeof(s_ind_busy));
+    NS_LOG_INFO("[APP_SVC] DB ready: ""180A@%u..%u 5453@%u..%u\r\n", (unsigned)env->shdl_180a, (unsigned)(env->shdl_180a + SVC180A_NB_ATT - 1u), (unsigned)env->shdl_5453, (unsigned)(env->shdl_5453 + SVC5453_NB_ATT - 1u));
+    return ATT_ERR_NO_ERROR;
+}
+
+
+static void app_svc_destroy(struct prf_task_env *p_env)
+{
+    if (p_env == NULL)return;
+
+    if (p_env->env != NULL)
+    {
+        ke_free(p_env->env);
+        p_env->env = NULL;
+    }
+
+    memset(s_ccc_ind, 0, sizeof(s_ccc_ind));
+    memset(s_ind_busy, 0, sizeof(s_ind_busy));
+}
+
+
+static void app_svc_create(struct prf_task_env *p_env, uint8_t conidx)
+{
+    (void)p_env;
+
+    if (conidx >= APP_SVC_MAX_CONN)return;
+
+    s_ccc_ind[conidx]  = false;
+    s_ind_busy[conidx] = false;
+}
+
+
+static void app_svc_cleanup(struct prf_task_env *p_env, uint8_t conidx, uint8_t reason)
+{
+    (void)reason;
+
+    if (conidx < APP_SVC_MAX_CONN)
+    {
+        s_ccc_ind[conidx]  = false;
+        s_ind_busy[conidx] = false;
+    }
+
+    if (p_env != NULL)app_svc_state_refresh(p_env->task);
+}
+
+
+const struct prf_task_cbs app_svc_itf =
+{
+    (prf_init_fnct)app_svc_init,
+    app_svc_destroy,
+    app_svc_create,
+    app_svc_cleanup,
+};
+
+
+const struct prf_task_cbs *app_svc_prf_itf_get(void)
+{
+    return &app_svc_itf;
+}
+
+
+void app_svc_add(void)
+{
+    struct gapm_profile_task_add_cmd *req;
+    struct prf_get_func_t get_func;
+    get_func.task_id = TASK_ID_APP_SVC;
+    get_func.prf_itf_get_func = app_svc_prf_itf_get;
+    prf_get_itf_func_register(&get_func);
+    req = KE_MSG_ALLOC(GAPM_PROFILE_TASK_ADD_CMD, TASK_GAPM, TASK_APP, gapm_profile_task_add_cmd);
+    req->operation = GAPM_PROFILE_TASK_ADD;
+    req->sec_lvl = PERM(SVC_AUTH, NO_AUTH);
+    req->prf_task_id = TASK_ID_APP_SVC;
+    req->app_task = TASK_APP;
+    req->start_hdl = 0u;
+    ke_msg_send(req);
+    NS_LOG_INFO("[APP_SVC] profile add requested ""(task=%u)\r\n", (unsigned)TASK_ID_APP_SVC);
+}
+
+
+bool app_svc_cmd_cmp_ind(uint8_t conidx, uint8_t cmd, uint8_t status, const uint8_t *data, uint16_t length)
+{
+    app_svc_env_t *env;
+    struct gattc_send_evt_cmd *req;
+    uint16_t max_payload;
+    uint16_t total;
+    ke_task_id_t gattc_task;
+    ke_task_id_t profile_task;
+    env = app_svc_env_get();
+
+    if (env == NULL)return false;
+
+    if (conidx >= APP_SVC_MAX_CONN)return false;
+
+    if ((length > 0u) && (data == NULL))return false;
+
+    if (!s_ccc_ind[conidx])return false;
+
+    if (s_ind_busy[conidx])return false;
+
+    max_payload = app_svc_cmd_payload_max(conidx);
+
+    if (max_payload == 0u)return false;
+
+    if (length > max_payload)
+    {
+        NS_LOG_WARNING("[APP_SVC] CMD_CMP truncate ""conidx=%u len=%u -> %u ""(mtu=%u)\r\n", (unsigned)conidx, (unsigned)length, (unsigned)max_payload, (unsigned)app_svc_att_mtu_get(conidx));
+        length = max_payload;
+    }
+
+    total = (uint16_t)(APP_SVC_CMD_HEADER_LEN + length);
+    gattc_task = KE_BUILD_ID(TASK_GATTC, conidx);
+    profile_task = prf_src_task_get((prf_env_t *)env, conidx);
+    req = KE_MSG_ALLOC_DYN(GATTC_SEND_EVT_CMD, gattc_task, profile_task, gattc_send_evt_cmd, total);
+    req->operation = GATTC_INDICATE;
+    req->handle = (uint16_t)(env->shdl_5453 + SVC5453_IDX_5400_VAL);
+    req->length = total;
+    req->value[0] = (uint8_t)APP_SVC_CMD_CMP_TAG;
+    req->value[1] = cmd;
+    req->value[2] = status;
+    req->value[3] = (uint8_t)length;
+    if (length > 0u)memcpy(&req->value[APP_SVC_CMD_HEADER_LEN], data, length);
+    s_ind_busy[conidx] = true;
+    app_svc_state_refresh(profile_task);
+    ke_msg_send(req);
+    NS_LOG_INFO("[APP_SVC] CMD_CMP IND " "conidx=%u cmd=%02X status=%02X " "payload=%u total=%u mtu=%u\r\n", (unsigned)conidx, (unsigned)cmd, (unsigned)status, (unsigned)length, (unsigned)total, (unsigned)app_svc_att_mtu_get(conidx));
+    return true;
+}
+
+
+void app_svc_on_link_lost(uint8_t conidx)
+{
+    app_svc_env_t *env;
+
+    if (conidx >= APP_SVC_MAX_CONN)return;
+
+    s_ccc_ind[conidx]  = false;
+    s_ind_busy[conidx] = false;
+    env = app_svc_env_get();
+
+    if (env != NULL)app_svc_state_refresh(prf_src_task_get((prf_env_t *)env, conidx));
+}

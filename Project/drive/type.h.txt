@@ -1,0 +1,102 @@
+
+#ifndef __TYEE_H__
+#define __TYEE_H__
+
+
+#define string char *
+
+#define true     1
+#define false    0
+
+#define Boolean unsigned char
+
+#define byte unsigned char
+#define Byte unsigned char
+#define SByte signed char
+
+#define UInt16 unsigned short
+#define Int16 signed short
+
+#define UInt32 unsigned int
+#define Int32 signed int
+
+
+typedef struct
+{
+    Byte b0: 1;
+    Byte b1: 1;
+    Byte b2: 1;
+    Byte b3: 1;
+    Byte b4: 1;
+    Byte b5: 1;
+    Byte b6: 1;
+    Byte b7: 1;
+} BitType;
+
+typedef struct
+{
+    Byte Bit0 : 1;
+    Byte Bit1 : 1;
+    Byte Bit2 : 1;
+    Byte Bit3 : 1;
+    Byte Bit4 : 1;
+    Byte Bit5 : 1;
+    Byte Bit6 : 1;
+    Byte Bit7 : 1;
+} Bit8Type;
+typedef struct
+{
+    Byte Bit0  : 1;
+    Byte Bit1  : 1;
+    Byte Bit2  : 1;
+    Byte Bit3  : 1;
+    Byte Bit4  : 1;
+    Byte Bit5  : 1;
+    Byte Bit6  : 1;
+    Byte Bit7  : 1;
+    Byte Bit8  : 1;
+    Byte Bit9  : 1;
+    Byte Bit10 : 1;
+    Byte Bit11 : 1;
+    Byte Bit12 : 1;
+    Byte Bit13 : 1;
+    Byte Bit14 : 1;
+    Byte Bit15 : 1;
+} Bit16Type;
+typedef struct
+{
+    Byte Bit0  : 1;
+    Byte Bit1  : 1;
+    Byte Bit2  : 1;
+    Byte Bit3  : 1;
+    Byte Bit4  : 1;
+    Byte Bit5  : 1;
+    Byte Bit6  : 1;
+    Byte Bit7  : 1;
+    Byte Bit8  : 1;
+    Byte Bit9  : 1;
+    Byte Bit10 : 1;
+    Byte Bit11 : 1;
+    Byte Bit12 : 1;
+    Byte Bit13 : 1;
+    Byte Bit14 : 1;
+    Byte Bit15 : 1;
+    Byte Bit16 : 1;
+    Byte Bit17 : 1;
+    Byte Bit18 : 1;
+    Byte Bit19 : 1;
+    Byte Bit20 : 1;
+    Byte Bit21 : 1;
+    Byte Bit22 : 1;
+    Byte Bit23 : 1;
+    Byte Bit24 : 1;
+    Byte Bit25 : 1;
+    Byte Bit26 : 1;
+    Byte Bit27 : 1;
+    Byte Bit28 : 1;
+    Byte Bit29 : 1;
+    Byte Bit30 : 1;
+    Byte Bit31 : 1;
+} Bit32Type;
+#endif
+

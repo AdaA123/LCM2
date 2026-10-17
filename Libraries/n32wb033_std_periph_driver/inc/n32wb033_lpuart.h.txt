@@ -1,0 +1,200 @@
+/**
+*     Copyright (c) 2026, Nsing Technologies Inc.
+*
+*     All rights reserved.
+*
+*     This software is the exclusive property of Nsing Technologies Inc. (Hereinafter
+* referred to as Nsing). This software, and the product of Nsing described herein
+* (Hereinafter referred to as the Product) are owned by Nsing under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     Nsing does not grant any license under its patents, copyrights, trademarks, or other
+* intellectual property rights. Names and brands of third party may be mentioned or referred
+* thereto (if any) for identification purposes only.
+*
+*     Nsing reserves the right to make changes, corrections, enhancements, modifications, and
+* improvements to this software at any time without notice. Please contact Nsing and obtain
+* the latest version of this software before placing orders.
+
+*     Although Nsing has attempted to provide accurate and reliable information, Nsing assumes
+* no responsibility for the accuracy and reliability of this software.
+*
+*     It is the responsibility of the user of this software to properly design, program, and test
+* the functionality and safety of any application made of this information and any resulting product.
+* In no event shall Nsing be liable for any direct, indirect, incidental, special,exemplary, or
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     Nsing Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify Nsing and hold Nsing
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by Nsing, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     Nsing products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations.
+* User shall comply with any applicable export control laws and regulations promulgated and administered by
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+/**
+*\*\file n32wb033_lpuart.h
+*\*\author Nsing
+*\*\version v1.0.0
+*\*\copyright Copyright (c) 2026, Nsing Technologies Inc. All rights reserved.
+**/
+#ifndef __N32WB033_LPUART_H__
+#define __N32WB033_LPUART_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "n32wb033.h"
+
+/** LPUART Init Structure definition **/
+
+typedef struct
+{
+    uint32_t BaudRate;            /* This member configures the LPUART communication baud rate.
+                                           The baud rate is computed using the following formula:
+                                            - IntegerDivider = ((CLK) / (LPUART_InitStruct->BaudRate))
+                                            - FractionalDivider */
+
+    uint32_t Parity;              /* Specifies the parity mode. */
+
+    uint32_t Mode;                /* Specifies wether the Receive or Transmit mode is enabled or disabled. */
+
+    uint32_t RtsThreshold;        /* Specifies RTS Threshold. */
+
+    uint32_t HardwareFlowControl; /* Specifies wether the hardware flow control mode is enabled or disabled. */
+} LPUART_InitType;
+
+/** LPUART Structure Definition End **/
+
+/** LPUART Macro Definition Start **/
+
+#define LPUART_REG_BIT_MASK        (uint32_t)0x00000000U
+
+/* LPUART CTRL Clear Mask */
+#define LPUART_CTRL_CLR_MASK           ((uint32_t)(~(LPUART_CTRL_TXEN \
+                                              | LPUART_CTRL_PSEL \
+                                              | LPUART_CTRL_PCDIS \
+                                              | LPUART_CTRL_RTS_THSEL_0 \
+                                              | LPUART_CTRL_RTS_THSEL_1 \
+                                              | LPUART_CTRL_CTSEN \
+                                              | LPUART_CTRL_RTSEN)))
+
+/** Configures the parity of LPUART **/
+#define LPUART_PE_NO               ((uint32_t)LPUART_CTRL_PCDIS)               /* Parity disable */
+#define LPUART_PE_EVEN             ((uint32_t)LPUART_REG_BIT_MASK)             /* Even parity */
+#define LPUART_PE_ODD              ((uint32_t)LPUART_CTRL_PSEL)                /* Odd parity */
+
+/** LPUART is configured as RX or TX **/
+#define LPUART_MODE_RX             ((uint32_t)LPUART_REG_BIT_MASK)             /* Receiver enable */
+#define LPUART_MODE_TX             ((uint32_t)LPUART_CTRL_TXEN)                /* Transmitter enable */
+
+/** LPUART RTS Threshold selection **/
+#define LPUART_RTSTH_FIFOHF        ((uint32_t)LPUART_REG_BIT_MASK)             /* FIFO Half Full */
+#define LPUART_RTSTH_FIFO3QF       ((uint32_t)LPUART_CTRL_RTS_THSEL_0)         /* FIFO 3/4 Full */
+#define LPUART_RTSTH_FIFOFU        ((uint32_t)LPUART_CTRL_RTS_THSEL_1)         /* FIFO Full */
+
+/** LPUART Hardware Flow Control **/
+#define LPUART_HFCTRL_NONE         ((uint32_t)LPUART_REG_BIT_MASK)
+#define LPUART_HFCTRL_RTS          ((uint32_t)LPUART_CTRL_RTSEN)
+#define LPUART_HFCTRL_CTS          ((uint32_t)LPUART_CTRL_CTSEN)
+#define LPUART_HFCTRL_RTS_CTS      ((uint32_t)(LPUART_CTRL_RTSEN | LPUART_CTRL_CTSEN))
+
+/** LPUART Interrupt definition **/
+#define LPUART_INT_MASK                ((uint32_t)0x0000007FU) /* LPUART Interrupt internal Mask */
+#define LPUART_INT_PEF                 ((uint32_t)(((uint32_t)0x00U << 8U) | LPUART_INTEN_PEIE))       /* PEIE=bit0 */
+#define LPUART_INT_TXC                 ((uint32_t)(((uint32_t)0x01U << 8U) | LPUART_INTEN_TXCIE))      /* TXCIE=bit1 */
+#define LPUART_INT_FIFO_OV             ((uint32_t)(((uint32_t)0x02U << 8U) | LPUART_INTEN_FIFO_OVIE))  /* FIFO_OVIE=bit2 */
+#define LPUART_INT_FIFO_FU             ((uint32_t)(((uint32_t)0x03U << 8U) | LPUART_INTEN_FIFO_FUIE))  /* FIFO_FUIE=bit3 */
+#define LPUART_INT_FIFO_HF             ((uint32_t)(((uint32_t)0x04U << 8U) | LPUART_INTEN_FIFO_HFIE))  /* FIFO_HFIE=bit4 */
+#define LPUART_INT_FIFO_NE             ((uint32_t)(((uint32_t)0x05U << 8U) | LPUART_INTEN_FIFO_NEIE))  /* FIFO_NEIE=bit5 */
+#define LPUART_INT_WUF                 ((uint32_t)(((uint32_t)0x06U << 8U) | LPUART_INTEN_WUFIE))      /* WUFIE=bit6 */
+
+/** LPUART DMA Requests **/
+#define LPUART_DMAREQ_TX             ((uint32_t)LPUART_CTRL_DMA_TXEN)
+#define LPUART_DMAREQ_RX             ((uint32_t)LPUART_CTRL_DMA_RXEN)
+
+/** LPUART WakeUp methods **/
+#define LPUART_WUSEL_CLR_MASK          ((uint32_t)(~LPUART_CTRL_WUSEL))
+#define LPUART_WUSTP_STARTBIT          ((uint32_t)LPUART_REG_BIT_MASK)
+#define LPUART_WUSTP_RXNE              ((uint32_t)LPUART_CTRL_WUSEL_0)
+#define LPUART_WUSTP_BYTE              ((uint32_t)LPUART_CTRL_WUSEL_1)
+#define LPUART_WUSTP_FRAME             ((uint32_t)(LPUART_CTRL_WUSEL_0 | LPUART_CTRL_WUSEL_1))
+
+/** LPUART WakeUp mode in Sleep enable **/
+#define CTRL_WUSTP_SET                 ((uint32_t)LPUART_CTRL_WUSTP)
+#define CTRL_WUSTP_RESET               ((uint32_t)(~LPUART_CTRL_WUSTP))
+
+/** LPUART Sampling methods **/
+#define LPUART_SMPCNT_CLR_MASK         ((uint32_t)(~LPUART_CTRL_SMPCNT))
+#define LPUART_SMPCNT_3B               ((uint32_t)LPUART_REG_BIT_MASK) /* 3 Sample bit */
+#define LPUART_SMPCNT_1B               ((uint32_t)LPUART_CTRL_SMPCNT)  /* 1 Sample bit */
+
+/** LPUART LoopBack Self-Test **/
+#define CTRL_LOOPBACK_SET              ((uint32_t)LPUART_CTRL_LOOKBACK)
+#define CTRL_LOOPBACK_RESET            ((uint32_t)(~LPUART_CTRL_LOOKBACK))
+
+/** LPUART Flush Receiver FIFO **/
+#define CTRL_FLUSH_SET                 ((uint32_t)LPUART_CTRL_FLUSH)
+#define CTRL_FLUSH_RESET               ((uint32_t)(~LPUART_CTRL_FLUSH))
+
+/** LPUART Flags **/
+#define LPUART_FLAG_PEF                ((uint32_t)LPUART_STS_PEF)
+#define LPUART_FLAG_TXC                ((uint32_t)LPUART_STS_TXC)
+#define LPUART_FLAG_FIFO_OV            ((uint32_t)LPUART_STS_FIFO_OV)
+#define LPUART_FLAG_FIFO_FU            ((uint32_t)LPUART_STS_FIFO_FU)
+#define LPUART_FLAG_FIFO_HF            ((uint32_t)LPUART_STS_FIFO_HF)
+#define LPUART_FLAG_FIFO_NE            ((uint32_t)LPUART_STS_FIFO_NE)
+#define LPUART_FLAG_CTS                ((uint32_t)LPUART_STS_CTS)
+#define LPUART_FLAG_WUF                ((uint32_t)LPUART_STS_WUF)
+#define LPUART_FLAG_NF                 ((uint32_t)LPUART_STS_NF)
+
+/* Reset and init */
+void LPUART_DeInit(const LPUART_Module* LPUARTx);
+void LPUART_Init(LPUART_Module* LPUARTx, const LPUART_InitType* LPUART_InitParam);
+void LPUART_StructInit(LPUART_InitType* LPUART_InitParam);
+
+/* FIFO */
+void LPUART_FlushRxFifo(LPUART_Module* LPUARTx);
+
+/* Data transfer */
+void LPUART_SendData(LPUART_Module* LPUARTx, uint8_t Data);
+uint8_t LPUART_ReceiveData(const LPUART_Module* LPUARTx);
+
+/* WakeUp configuration */
+void LPUART_ConfigWakeUpMethod(LPUART_Module* LPUARTx, uint32_t LPUART_WakeUpMethod);
+void LPUART_EnableWakeUpSleep(LPUART_Module* LPUARTx, FunctionalState Cmd);
+void LPUART_ConfigWakeUpData(LPUART_Module* LPUARTx, uint32_t LPUART_WakeUpData);
+
+/* Miscellaneous configuration */
+void LPUART_ConfigSamplingMethod(LPUART_Module* LPUARTx, uint32_t LPUART_SamplingMethod);
+void LPUART_EnableLoopBack(LPUART_Module* LPUARTx, FunctionalState Cmd);
+
+/* DMA */
+void LPUART_EnableDMA(LPUART_Module* LPUARTx, uint32_t LPUART_DMAReq, FunctionalState Cmd);
+
+/* Interrupt and flag management */
+void LPUART_ConfigInt(LPUART_Module* LPUARTx, uint32_t LPUART_INT, FunctionalState Cmd);
+FlagStatus LPUART_GetFlagStatus(const LPUART_Module* LPUARTx, uint32_t LPUART_FLAG);
+void LPUART_ClrFlag(LPUART_Module* LPUARTx, uint32_t LPUART_FLAG);
+INTStatus LPUART_GetIntStatus(const LPUART_Module* LPUARTx, uint32_t LPUART_INT);
+void LPUART_ClrIntPendingBit(LPUART_Module* LPUARTx, uint32_t LPUART_INT);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __N32WB033_LPUART_H__ */

@@ -1,0 +1,291 @@
+#include "n32wb033.h"
+#include "n32wb033_gpio.h"
+#include "n32wb033_rcc.h"
+#include "n32wb033_tim.h"
+#include "misc.h"
+#include "global_func.h"
+#include "proto.h"
+#include "one_wire.h"
+#include <string.h>
+#include "Mytask.h"
+#include "my_ble.h"
+#include "core.h"
+
+#define ONE_WIRE_FRAME_ID       0x3Au
+#define ONE_WIRE_VERSION        0x13u
+#define ONE_WIRE_DATA_LEN       29u
+#define ONE_WIRE_FRAME_LEN      31u
+
+#define ONEWIRE_TICK_US         500
+#define ONEWIRE_SYNC_LOW_TICKS  21u
+#define ONEWIRE_SYNC_HIGH_TICKS 2u
+#define ONEWIRE_BIT1_LOW_TICKS  1u
+#define ONEWIRE_BIT1_HIGH_TICKS 3u
+#define ONEWIRE_BIT0_LOW_TICKS  3u
+#define ONEWIRE_BIT0_HIGH_TICKS 1u
+#define ONEWIRE_STOP_LOW_TICKS  11u
+#define ONEWIRE_STOP_HIGH_TICKS 100
+
+typedef enum
+{
+    ONE_WIRE_STATE_IDLE = 0,
+    ONE_WIRE_STATE_SYNC_LOW,
+    ONE_WIRE_STATE_SYNC_HIGH,
+    ONE_WIRE_STATE_BIT_LOW,
+    ONE_WIRE_STATE_BIT_HIGH,
+    ONE_WIRE_STATE_STOP_LOW,
+    ONE_WIRE_STATE_STOP_HIGH
+} one_wire_state_t;
+
+typedef struct
+{
+    volatile one_wire_state_t state;
+    volatile uint16_t tick;
+    volatile uint8_t byte_index;
+    volatile uint8_t bit_index;
+    volatile uint8_t current_bit;
+    uint8_t frame[ONE_WIRE_FRAME_LEN];
+} one_wire_context_t;
+
+static one_wire_context_t s_one_wire;
+
+static uint8_t one_wire_sum(const uint8_t *data, uint8_t length)
+{
+    uint16_t sum = 0;
+    uint8_t index;
+
+    for (index = 0; index < length; index++)
+        sum = (uint16_t)(sum + data[index]);
+
+    return (uint8_t)sum;
+}
+
+static void one_wire_start_bit(void)
+{
+    uint8_t data;
+    data = s_one_wire.frame[s_one_wire.byte_index];
+    s_one_wire.current_bit = (uint8_t)((data >> s_one_wire.bit_index) & 0x01);
+    s_one_wire.tick = 0;
+    s_one_wire.state = ONE_WIRE_STATE_BIT_LOW;
+    GPIO_ResetBits(GPIOC, GPIO_PIN_1);
+}
+
+static Byte one_wire_model_is_enabled(void)
+{
+    return (Byte)((YB_N32W_BLE_002_HOST == 65) &&
+                  (YB_N32W_BLE_002_SLAVE == 0));
+}
+
+static Int16 one_wire_ble_event(my_ble_event_t event)
+{
+    if (event == MY_BLE_EVENT_READY)
+        return OneWire_TaskStart();
+    if (event == MY_BLE_EVENT_ERROR)
+        OneWire_TaskStop();
+    return CHAR_DEV_OK;
+}
+
+void OneWire_Init(void)
+{
+    (void)My_Ble_EventSubscribe(one_wire_ble_event, 2u);
+    if (one_wire_model_is_enabled() == 0u)
+        return;
+
+    GPIO_InitType gpio;
+    TIM_TimeBaseInitType tb;
+    NVIC_InitType nvic;
+    RCC_EnableAPB2PeriphClk(RCC_APB2_PERIPH_GPIOC, ENABLE);
+    GPIO_InitStruct(&gpio);
+    gpio.Pin = GPIO_PIN_1;
+    gpio.GPIO_Mode = GPIO_MODE_OUTPUT_OD;
+    gpio.GPIO_Pull = GPIO_PULL_DOWN;
+    GPIO_InitPeripheral(GPIOC, &gpio);
+    GPIO_SetBits(GPIOC, GPIO_PIN_1);
+    RCC_EnableAPB1PeriphClk(RCC_APB1_PERIPH_BTIM1, ENABLE);
+    TIM_Enable(BTIM1, DISABLE);
+    TIM_InitTimBaseStruct(&tb);
+    tb.Prescaler = (uint16_t)((SystemCoreClock / 1000000) - 1);
+    tb.Period = (uint16_t)(ONEWIRE_TICK_US - 1);
+    tb.ClkDiv = TIM_CLK_DIV1;
+    tb.CounterMode = TIM_CNT_MODE_UP;
+    TIM_InitTimeBase(BTIM1, &tb);
+    TIM_ConfigPrescaler(BTIM1, tb.Prescaler, TIM_PSC_RELOAD_MODE_IMMEDIATE);
+    ModuleIrqRegister(BTIM1_IRQn, OneWire_TimerISR);
+    TIM_ClrIntPendingBit(BTIM1, TIM_INT_UPDATE);
+    NVIC_ClearPendingIRQ(BTIM1_IRQn);
+    nvic.NVIC_IRQChannel = BTIM1_IRQn;
+    nvic.NVIC_IRQChannelPriority = NVIC_PRIORITY_3;
+    nvic.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&nvic);
+    TIM_ConfigInt(BTIM1, TIM_INT_UPDATE, DISABLE);
+    s_one_wire.state = ONE_WIRE_STATE_IDLE;
+}
+
+void OneWire_BuildFrame(void)
+{
+    const com_0x11_type *battery_status = 0;
+    uint16_t voltage_raw;
+    uint16_t current_raw;
+
+    if (s_one_wire.state != ONE_WIRE_STATE_IDLE)
+        return;
+
+    memset(s_one_wire.frame, 0, sizeof(s_one_wire.frame));
+    s_one_wire.frame[0] = ONE_WIRE_FRAME_ID;
+    s_one_wire.frame[1] = ONE_WIRE_VERSION;
+    s_one_wire.frame[2] = ONE_WIRE_DATA_LEN;
+
+    if (Proto_IsBatteryStatusReady() != 0)
+        battery_status = Proto_GetBatteryStatus();
+
+    if (battery_status != 0)
+    {
+        s_one_wire.frame[3] = (uint8_t)(battery_status->vbat.Soc * 2);
+        voltage_raw = (uint16_t)(battery_status->vbat.Voltage / 100);
+        s_one_wire.frame[4] = (uint8_t)(voltage_raw & 0xFF);
+        s_one_wire.frame[5] = (uint8_t)(voltage_raw >> 8);
+        current_raw = (uint16_t)(battery_status->vbat.Current / 100);
+        s_one_wire.frame[6] = (uint8_t)(current_raw & 0xFF);
+        s_one_wire.frame[7] = (uint8_t)(current_raw >> 8);
+    }
+
+    s_one_wire.frame[12] = 0x01;
+
+    if (battery_status != 0)
+        s_one_wire.frame[26] = ((battery_status->vbatStat & 0x03) != 0) ? 4 : 0;
+
+    s_one_wire.frame[30] = one_wire_sum(s_one_wire.frame, 30);
+    s_one_wire.tick = 0;
+    s_one_wire.byte_index = 0;
+    s_one_wire.bit_index = 0;
+    s_one_wire.current_bit = 0;
+    s_one_wire.state = ONE_WIRE_STATE_SYNC_LOW;
+    GPIO_ResetBits(GPIOC, GPIO_PIN_1);
+    TIM_Enable(BTIM1, DISABLE);
+    BTIM1->CNT = 0;
+    TIM_ClrIntPendingBit(BTIM1, TIM_INT_UPDATE);
+    NVIC_ClearPendingIRQ(BTIM1_IRQn);
+    TIM_ConfigInt(BTIM1, TIM_INT_UPDATE, ENABLE);
+    TIM_Enable(BTIM1, ENABLE);
+}
+
+void OneWire_TimerISR(void)
+{
+    if (TIM_GetIntStatus(BTIM1, TIM_INT_UPDATE) == RESET)
+        return;
+
+    TIM_ClrIntPendingBit(BTIM1, TIM_INT_UPDATE);
+
+    switch (s_one_wire.state)
+    {
+        case ONE_WIRE_STATE_SYNC_LOW:
+            if (++s_one_wire.tick >= ONEWIRE_SYNC_LOW_TICKS)
+            {
+                s_one_wire.tick = 0;
+                s_one_wire.state = ONE_WIRE_STATE_SYNC_HIGH;
+                GPIO_SetBits(GPIOC, GPIO_PIN_1);
+            }
+
+            break;
+
+        case ONE_WIRE_STATE_SYNC_HIGH:
+            if (++s_one_wire.tick >= ONEWIRE_SYNC_HIGH_TICKS)
+            {
+                s_one_wire.tick = 0;
+                s_one_wire.byte_index = 0;
+                s_one_wire.bit_index = 0;
+                one_wire_start_bit();
+            }
+
+            break;
+
+        case ONE_WIRE_STATE_BIT_LOW:
+            if (++s_one_wire.tick >= ((s_one_wire.current_bit != 0) ? ONEWIRE_BIT1_LOW_TICKS : ONEWIRE_BIT0_LOW_TICKS))
+            {
+                s_one_wire.tick = 0;
+                s_one_wire.state = ONE_WIRE_STATE_BIT_HIGH;
+                GPIO_SetBits(GPIOC, GPIO_PIN_1);
+            }
+
+            break;
+
+        case ONE_WIRE_STATE_BIT_HIGH:
+            if (++s_one_wire.tick >= ((s_one_wire.current_bit != 0) ? ONEWIRE_BIT1_HIGH_TICKS : ONEWIRE_BIT0_HIGH_TICKS))
+            {
+                s_one_wire.tick = 0;
+                s_one_wire.bit_index++;
+
+                if (s_one_wire.bit_index >= 8)
+                {
+                    s_one_wire.bit_index = 0;
+                    s_one_wire.byte_index++;
+
+                    if (s_one_wire.byte_index >= ONE_WIRE_FRAME_LEN)
+                    {
+                        s_one_wire.state = ONE_WIRE_STATE_STOP_LOW;
+                        GPIO_ResetBits(GPIOC, GPIO_PIN_1);
+                    }
+                    else
+                        one_wire_start_bit();
+                }
+                else
+                    one_wire_start_bit();
+            }
+
+            break;
+
+        case ONE_WIRE_STATE_STOP_LOW:
+            if (++s_one_wire.tick >= ONEWIRE_STOP_LOW_TICKS)
+            {
+                s_one_wire.tick = 0;
+                s_one_wire.state = ONE_WIRE_STATE_STOP_HIGH;
+                GPIO_SetBits(GPIOC, GPIO_PIN_1);
+            }
+
+            break;
+
+        case ONE_WIRE_STATE_STOP_HIGH:
+            if (++s_one_wire.tick >= ONEWIRE_STOP_HIGH_TICKS)
+            {
+                TIM_Enable(BTIM1, DISABLE);
+                TIM_ConfigInt(BTIM1, TIM_INT_UPDATE, DISABLE);
+                TIM_ClrIntPendingBit(BTIM1, TIM_INT_UPDATE);
+                BTIM1->CNT = 0;
+                GPIO_SetBits(GPIOC, GPIO_PIN_1);
+                s_one_wire.tick = 0;
+                s_one_wire.byte_index = 0;
+                s_one_wire.bit_index = 0;
+                s_one_wire.current_bit = 0;
+                s_one_wire.state = ONE_WIRE_STATE_IDLE;
+            }
+
+            break;
+
+        case ONE_WIRE_STATE_IDLE:
+        default:
+            break;
+    }
+}
+
+static void one_wire_task(void)
+{
+    if (My_Ble_BackgroundBusy() == 0u)
+        OneWire_BuildFrame();
+}
+
+Int16 OneWire_TaskStart(void)
+{
+    if (one_wire_model_is_enabled() == 0u)
+        return CHAR_DEV_OK;
+
+    if (TaskFind(one_wire_task) != 0xFFFFu)
+        return CHAR_DEV_OK;
+
+    return (TaskAdd(2000u, one_wire_task) != 0u) ?
+           CHAR_DEV_OK : CHAR_DEV_ERR_STATE;
+}
+
+void OneWire_TaskStop(void)
+{
+    (void)TaskDelete(one_wire_task);
+}

@@ -1,0 +1,41 @@
+#ifndef LED_H
+#define LED_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+#include "type.h"
+typedef enum 
+{
+    LED_STATE_STANDBY = 0,
+    LED_STATE_NORMAL,
+    LED_STATE_MASTER_CONNECTING,
+    LED_STATE_SLAVE_CONNECTED,
+    LED_STATE_MASTER_CONNECTED,
+    LED_STATE_CONNECTED,
+    LED_STATE_CONNECTION_FAILED,
+    LED_STATE_COMMUNICATION,
+    LED_STATE_UPGRADE,
+    LED_STATE_ERROR,
+    LED_STATE_COUNT
+} led_state_t;
+
+#define LED_TICK_PERIOD_MS 50u
+
+void Led_Init(void);
+/* Start/stop the 50 ms display task after the application is ready. */
+Int16 Led_TaskStart(void);
+void Led_TaskStop(void);
+void Led_StateSet(led_state_t state);
+void Led_ActivityNotify(void);
+void Led_ConnectionFailedNotify(void);
+void Led_Tick(void);
+led_state_t Led_StateGet(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LED_H */

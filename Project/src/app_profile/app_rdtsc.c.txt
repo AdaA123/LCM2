@@ -1,0 +1,184 @@
+#include "rwip_config.h"
+
+#if (BLE_RDTS_CLIENT)
+
+/* Includes ------------------------------------------------------------------*/
+#include <string.h>
+#include "co_utils.h"
+#include "app_rdtsc.h"
+#include "rdts_client_task.h"
+#include "rdts_client.h"
+#include "prf_utils_128.h"
+#include "gapm_task.h"
+#include "ns_ble.h"
+#include "prf.h"
+#include "ns_log.h"
+#include "ble_port_rw.h"
+
+
+const uint8_t rdtsc_uuid128[] = RDTS_SERVICE_UUID;
+
+const struct prf_char_def_128 rdtsc_char[RDTSC_CHAR_MAX] =
+{
+    [RDTSC_SRV_TX_DATA_CHAR] = {RDTS_SERVER_TX_UUID, ATT_MANDATORY, ATT_CHAR_PROP_NTF},
+    [RDTSC_SRV_RX_DATA_CHAR] = {RDTS_SERVER_RX_UUID, ATT_MANDATORY, ATT_CHAR_PROP_WR_NO_RESP},
+};
+
+const struct prf_char_desc_def rdtsc_desc[RDTSC_DESC_MAX] =
+{
+    [RDTSC_SRV_TX_DATA_CLI_CFG] = {ATT_DESC_CLIENT_CHAR_CFG, ATT_MANDATORY, RDTSC_SRV_TX_DATA_CHAR},
+};
+
+static uint32_t s_ul_rx_cnt  = 0;
+static uint32_t s_dl_cfm_cnt = 0;
+
+
+void app_rdtsc_init(void)
+{
+    struct prf_task_t prf;
+    struct prf_get_func_t get_func;
+    prf.prf_task_id      = TASK_ID_RDTSC;
+    prf.prf_task_handler = &app_rdtsc_handlers;
+    ns_ble_prf_task_register(&prf);
+    get_func.task_id         = TASK_ID_RDTSC;
+    get_func.prf_itf_get_func = rdtsc_prf_itf_get;
+    prf_get_itf_func_register(&get_func);
+}
+
+void app_rdtsc_add_rdts(void)
+{
+    struct rdtsc_db_cfg *db_cfg;
+    struct gapm_profile_task_add_cmd *req;
+    req = KE_MSG_ALLOC_DYN(GAPM_PROFILE_TASK_ADD_CMD, TASK_GAPM, TASK_APP,
+                           gapm_profile_task_add_cmd, sizeof(struct rdtsc_db_cfg));
+    req->operation   = GAPM_PROFILE_TASK_ADD;
+    req->sec_lvl     = PERM(SVC_AUTH, NO_AUTH);
+    req->prf_task_id = TASK_ID_RDTSC;
+    req->app_task    = TASK_APP;
+    req->start_hdl   = 0;
+    db_cfg = (struct rdtsc_db_cfg *)req->param;
+    db_cfg->p_char    = &rdtsc_char[0];
+    db_cfg->p_desc    = &rdtsc_desc[0];
+    db_cfg->p_uuid128 = rdtsc_uuid128;
+    ke_msg_send(req);
+    NS_LOG_INFO("[GATT_PRF] RDTSC client registering: svc=...1001 (TX ...0002 / RX ...0001)\r\n");
+    app_rdtsc_init();
+}
+
+void app_rdtsc_enable_prf(uint8_t conidx)
+{
+    struct rdtsc_enable_req *req;
+    req = KE_MSG_ALLOC(RDTSC_ENABLE_REQ,
+                       prf_get_task_from_id(TASK_ID_RDTSC),
+                       TASK_APP,
+                       rdtsc_enable_req);
+    req->conidx   = conidx;
+    req->con_type = PRF_CON_DISCOVERY;
+    ke_msg_send(req);
+}
+
+int rdtsc_enable_cfm_handler(ke_msg_id_t const msgid,
+                             struct rdtsc_enable_cfm const *param,
+                             ke_task_id_t const dest_id,
+                             ke_task_id_t const src_id)
+{
+    if(param->status == ATT_ERR_NO_ERROR)
+    {
+        uint16_t rx_val_hdl = param->rdts.chars[RDTSC_SRV_RX_DATA_CHAR].val_hdl;
+        uint16_t tx_ccc_hdl = param->rdts.descs[RDTSC_SRV_TX_DATA_CLI_CFG].desc_hdl;
+        uint16_t svc_shdl   = param->rdts.svc.shdl;
+        uint16_t svc_ehdl   = param->rdts.svc.ehdl;
+        NS_LOG_INFO("[GATT_PRF] BMS Discovery OK (conidx=%d): svc=[0x%04X..0x%04X] "
+                    "RX_val_hdl=0x%04X TX_CCCD=0x%04X\r\n",
+                    param->conidx, svc_shdl, svc_ehdl, rx_val_hdl, tx_ccc_hdl);
+        NS_LOG_INFO("[GATT_PRF]   char props: TX=0x%02X(expect 0x12 NTF) RX=0x%02X(expect 0x0C W+WNR) - swap shows here\r\n",
+                    param->rdts.chars[RDTSC_SRV_TX_DATA_CHAR].prop,
+                    param->rdts.chars[RDTSC_SRV_RX_DATA_CHAR].prop);
+        NS_LOG_INFO("[GATT_PRF] BMS TX CCCD auto-enabled by profile (uplink Notify ON)\r\n");
+        rx_val_hdl = rx_val_hdl;
+        tx_ccc_hdl = tx_ccc_hdl;
+        svc_shdl   = svc_shdl;
+        svc_ehdl   = svc_ehdl;
+        ble_port_bms_ready(param->conidx, 0);
+    }
+    else
+    {
+        {
+            struct rdtsc_env_tag *env = (struct rdtsc_env_tag *)prf_env_get(TASK_ID_RDTSC);
+
+            if(env != NULL)
+            {
+                NS_LOG_ERROR("[GATT_PRF] BMS Discovery FAILED (conidx=%d, status=0x%02X) "
+                             "DIAG: svc=[0x%04X..0x%04X] nb_svc=%d TX_val=0x%04X RX_val=0x%04X\r\n",
+                             param->conidx, param->status,
+                             env->rdts.svc.shdl, env->rdts.svc.ehdl, env->nb_svc,
+                             env->rdts.chars[RDTSC_SRV_TX_DATA_CHAR].val_hdl,
+                             env->rdts.chars[RDTSC_SRV_RX_DATA_CHAR].val_hdl);
+
+                if(env->rdts.svc.shdl == ATT_INVALID_HANDLE)
+                    NS_LOG_ERROR("[GATT_PRF] DIAG: SERVICE ...2760 NOT on peer (wrong device or service UUID)\r\n");
+
+                else
+                    NS_LOG_ERROR("[GATT_PRF] DIAG: SERVICE found, mandatory CHAR missing (TX 0002 NTF / RX 0001 WNR)\r\n");
+            }
+            else
+            {
+                NS_LOG_ERROR("[GATT_PRF] BMS Discovery FAILED (conidx=%d, status=0x%02X) DIAG: env==NULL\r\n",
+                             param->conidx, param->status);
+            }
+        }
+        ble_port_bms_ready(param->conidx, param->status);
+    }
+
+    return (KE_MSG_CONSUMED);
+}
+
+int rdtsc_data_tx_cfm_handler(ke_msg_id_t const msgid,
+                              struct rdtsc_data_tx_cfm const *param,
+                              ke_task_id_t const dest_id,
+                              ke_task_id_t const src_id)
+{
+    s_dl_cfm_cnt++;
+
+    if(param->status != ATT_ERR_NO_ERROR)
+    {
+        NS_LOG_ERROR("[APP_DATA] Downlink WRITE cfm ERROR: conidx=%d status=0x%02X (cnt=%u)\r\n",
+                     param->conidx, param->status, (unsigned)s_dl_cfm_cnt);
+    }
+    else if((s_dl_cfm_cnt % 100u) == 1u)
+    {
+        NS_LOG_INFO("[APP_DATA] Downlink WRITE cfm OK: cnt=%u (log every 100)\r\n",
+                    (unsigned)s_dl_cfm_cnt);
+    }
+
+    ble_port_on_tx_cfm(BLE_ENDPOINT_BMS, param->conidx, param->seq_num);
+    return (KE_MSG_CONSUMED);
+}
+
+int rdtsc_data_rx_ind_handler(ke_msg_id_t const msgid,
+                              struct rdtsc_data_rx_ind const *param,
+                              ke_task_id_t const dest_id,
+                              ke_task_id_t const src_id)
+{
+    s_ul_rx_cnt++;
+
+    if((s_ul_rx_cnt % 100u) == 1u)
+    {
+        NS_LOG_INFO("[APP_DATA] UL notify from BMS: conidx=%d cnt=%u (log every 100)\r\n",
+                    param->conidx, (unsigned)s_ul_rx_cnt);
+    }
+
+    ble_port_data_rx(param->conidx, param->data, param->length);
+    return (KE_MSG_CONSUMED);
+}
+
+const struct ke_msg_handler app_rdtsc_msg_handler_list[] =
+{
+    {RDTSC_ENABLE_CFM, (ke_msg_func_t)rdtsc_enable_cfm_handler},
+    {RDTSC_DATA_TX_CFM, (ke_msg_func_t)rdtsc_data_tx_cfm_handler},
+    {RDTSC_DATA_RX_IND, (ke_msg_func_t)rdtsc_data_rx_ind_handler},
+};
+
+const struct app_subtask_handlers app_rdtsc_handlers = APP_HANDLERS(app_rdtsc);
+
+#endif // BLE_RDTS_CLIENT

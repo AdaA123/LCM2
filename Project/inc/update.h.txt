@@ -1,0 +1,47 @@
+#ifndef FIRMWARE_UPDATE_H
+#define FIRMWARE_UPDATE_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "type.h"
+
+#define FW_UPDATE_TIMER_MESSAGE_ID 7u
+typedef struct
+{
+    Byte low;
+    Byte high;
+} upd_crc_t;
+
+typedef struct
+{
+    char      label_code[16];
+    Byte   reserved1[3];
+    Byte   complete_state;
+    UInt32  image_length;
+    upd_crc_t crc_front;
+    upd_crc_t crc_after;
+    UInt32  timestamp;
+    char      version[8];
+    char      build_time[20];
+    char      build_date[20];
+    char      project_name[20];
+    char      reserved2[28];
+} software_information_t;
+typedef Int16 (*firmware_update_send_t)(Byte port, Byte type, const Byte *data, UInt16 length);
+
+void FirmwareUpdate_SendBind(firmware_update_send_t sender);
+void FirmwareUpdate_Handle(Byte port, Byte type, const Byte *data, UInt16 data_length);
+void FirmwareUpdate_Tick(void);
+Byte FirmwareUpdate_IsActive(void);
+void FirmwareUpdate_Abort(void);
+void FirmwareUpdate_AbortPort(Byte port);
+extern const software_information_t SoftwareInformation;
+#ifdef __cplusplus
+}
+#endif
+
+#endif

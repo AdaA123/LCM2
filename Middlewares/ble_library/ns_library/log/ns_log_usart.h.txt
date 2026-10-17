@@ -1,0 +1,6 @@
+#ifndef NS_LOG_USART_H
+#define NS_LOG_USART_H
+
+/* Legacy compatibility header. Log output is device-independent. */
+
+#endif /* NS_LOG_USART_H */

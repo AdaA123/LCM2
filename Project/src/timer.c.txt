@@ -1,0 +1,124 @@
+/**
+ * @file    timer.c
+ * @brief   GTIM1 millisecond system-tick driver (hang-fixed ordering + logs)
+ *
+ * WHY THE OLD ORDER HUNG AT NVIC_Init():
+ *   The counter was started (TIM_Enable) and its UPDATE interrupt enabled
+ *   BEFORE NVIC_Init. The update flag went pending ~1 ms later; the moment
+ *   NVIC_Init enabled the IRQ line, the pending interrupt was taken - but
+ *   ModuleIrqRegister() had not run yet, so the ROM dispatcher entry was
+ *   empty and the fetch landed in the default handler loop = "hang".
+ *
+ * FIXED ORDER (nothing can fire until every piece is in place):
+ *   step1 clock -> step2 timebase (counter still stopped)
+ *   -> step3 ModuleIrqRegister (handler in place)
+ *   -> step4 NVIC_Init (line enabled, no pending flag, int still disabled)
+ *   -> step5 clear stray pending flag
+ *   -> step6 peripheral int enable + counter start (last action)
+ *
+ * Log discipline (six-tag taxonomy):
+ *   [SYS_BOOT] init step trace + self-test   (init context, safe to log)
+ *   [APP_DATA] runtime diagnostics           (never log inside the ISR)
+ */
+#include "n32wb033.h"
+#include "n32wb033_rcc.h"
+#include "n32wb033_tim.h"
+#include "misc.h"           /* NVIC_Init / NVIC_PRIORITY_x */
+#include "global_func.h"    /* ModuleIrqRegister: ISR registration to ROM dispatcher */
+#include "ns_log.h"
+#include "timer.h"
+
+static volatile uint32_t s_tick_ms = 0u;   /* free-running ms counter (ISR-owned) */
+
+void TIMER_TICK_IRQHandler(void);
+
+/** Configure GTIM1 as the 1 ms system tick source. */
+void Timer_Init(void)
+{
+    TIM_TimeBaseInitType tb;
+    NVIC_InitType        nvic;
+    uint32_t t0;
+    uint32_t selftest_tick;
+    NS_LOG_INFO("[SYS_BOOT] Timer_Init: enter (SystemCoreClock=%u Hz)\r\n",
+                (unsigned)SystemCoreClock);
+    /* step1: peripheral clock */
+    TIMER_TICK_CLK_ENABLE();
+    NS_LOG_INFO("[SYS_BOOT] Timer step1: GTIM1 clock enabled\r\n");
+    /* step2: time base (counter NOT started yet). */
+    TIM_InitTimBaseStruct(&tb);
+    tb.Period      = (1000000u / TIMER_TICK_HZ) - 1u;
+    tb.Prescaler   = (uint16_t)((SystemCoreClock / 1000000u) - 1u);
+    tb.ClkDiv      = TIM_CLK_DIV1;
+    tb.CounterMode = TIM_CNT_MODE_UP;
+    TIM_InitTimeBase(TIMER_TICK_TIM, &tb);
+    TIM_ConfigPrescaler(TIMER_TICK_TIM, tb.Prescaler, TIM_PSC_RELOAD_MODE_IMMEDIATE);
+    NS_LOG_INFO("[SYS_BOOT] Timer step2: timebase PSC=%u ARR=%u (1 ms tick)\r\n",
+                (unsigned)tb.Prescaler, (unsigned)tb.Period);
+    /* step3: register the ISR into the ROM dispatcher BEFORE the line can fire */
+    ModuleIrqRegister(TIMER_TICK_IRQn, TIMER_TICK_IRQHandler);
+    NS_LOG_INFO("[SYS_BOOT] Timer step3: ModuleIrqRegister(irqn=%d) done\r\n",
+                (int)TIMER_TICK_IRQn);
+    /* step4: clear BOTH the peripheral flag AND the NVIC pending flag from earlier accesses */
+    TIM_ClrIntPendingBit(TIMER_TICK_TIM, TIM_INT_UPDATE);
+    NVIC_ClearPendingIRQ(TIMER_TICK_IRQn); // CRITICAL: Clear any latched state in the NVIC core!
+    NS_LOG_INFO("[SYS_BOOT] Timer step4: pending flags cleared\r\n");
+    /* step5: NVIC line enable - completely safe now */
+    nvic.NVIC_IRQChannel         = TIMER_TICK_IRQn;
+    nvic.NVIC_IRQChannelPriority = NVIC_PRIORITY_3;
+    nvic.NVIC_IRQChannelCmd      = ENABLE;
+    NVIC_Init(&nvic);
+    NS_LOG_INFO("[SYS_BOOT] Timer step5: NVIC prio=%d enabled\r\n",
+                (int)nvic.NVIC_IRQChannelPriority);
+    /* step6: LAST action - peripheral int enable + counter start */
+    TIM_ConfigInt(TIMER_TICK_TIM, TIM_INT_UPDATE, ENABLE);
+    TIM_Enable(TIMER_TICK_TIM, ENABLE);
+    NS_LOG_INFO("[SYS_BOOT] Timer step6: counter started, IRQ live\r\n");
+    /* self-test */
+    t0 = Timer_GetTick();
+    Timer_DelayMs(3u);
+    selftest_tick = Timer_GetTick();
+
+    if((selftest_tick - t0) >= 3u)
+    {
+        NS_LOG_INFO("[APP_DATA] Timer self-test PASS: tick=%u (+%u ms)\r\n",
+                    (unsigned)selftest_tick, (unsigned)(selftest_tick - t0));
+    }
+    else
+    {
+        NS_LOG_ERROR("[APP_DATA] Timer self-test FAIL: tick=%u after 3 ms wait\r\n",
+                     (unsigned)selftest_tick);
+    }
+
+    NS_LOG_INFO("[SYS_BOOT] Timer_Init: done\r\n");
+}
+
+uint32_t Timer_GetTick(void)
+{
+    return s_tick_ms;
+}
+
+uint8_t Timer_Elapsed(uint32_t start_tick, uint32_t dur_ms)
+{
+    return (uint8_t)(((uint32_t)(s_tick_ms - start_tick)) >= dur_ms);
+}
+
+void Timer_DelayMs(uint32_t ms)
+{
+    uint32_t start = s_tick_ms;
+
+    while(((uint32_t)(s_tick_ms - start)) < ms)
+    {
+        /* busy wait: tick advances in ISR context */
+    }
+}
+
+/** 1 ms update interrupt: clear pending flag, bump the tick.
+ *  NEVER log here - this runs above the cooperative main loop. */
+void TIMER_TICK_IRQHandler(void)
+{
+    if(TIM_GetIntStatus(TIMER_TICK_TIM, TIM_INT_UPDATE) != RESET)
+    {
+        TIM_ClrIntPendingBit(TIMER_TICK_TIM, TIM_INT_UPDATE);
+        s_tick_ms++;
+    }
+}

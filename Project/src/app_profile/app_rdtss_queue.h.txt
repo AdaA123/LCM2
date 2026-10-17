@@ -1,0 +1,50 @@
+#ifndef APP_RDTSS_QUEUE_H
+#define APP_RDTSS_QUEUE_H
+
+#include <stdint.h>
+
+#define APP_RDTSS_QUEUE_PAYLOAD_MAX 247u
+
+typedef struct
+{
+    uint8_t  conidx;
+    uint8_t  att_idx;
+    uint16_t tx_token;
+    uint16_t len;
+    uint8_t  data[APP_RDTSS_QUEUE_PAYLOAD_MAX];
+} app_rdtss_queue_item_t;
+
+static uint8_t AppRdtssQueue_RemoveConnection(
+    app_rdtss_queue_item_t *items, uint8_t capacity,
+    uint8_t tail, uint8_t *head, uint8_t conidx)
+{
+    uint8_t dropped = 0u;
+    uint8_t read_index;
+    uint8_t write_index;
+
+    if ((items == 0) || (head == 0) || (capacity < 2u) ||
+        (*head >= capacity) || (tail >= capacity))
+        return 0u;
+
+    write_index = tail;
+
+    for (read_index = tail; read_index != *head;
+         read_index = (uint8_t)((read_index + 1u) % capacity))
+    {
+        if (items[read_index].conidx == conidx)
+        {
+            dropped++;
+            continue;
+        }
+
+        if (write_index != read_index)
+            items[write_index] = items[read_index];
+
+        write_index = (uint8_t)((write_index + 1u) % capacity);
+    }
+
+    *head = write_index;
+    return dropped;
+}
+
+#endif /* APP_RDTSS_QUEUE_H */

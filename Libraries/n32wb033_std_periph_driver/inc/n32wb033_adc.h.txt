@@ -1,0 +1,417 @@
+/**
+*     Copyright (c) 2026, Nsing Technologies Inc.
+*
+*     All rights reserved.
+*
+*     This software is the exclusive property of Nsing Technologies Inc. (Hereinafter
+* referred to as Nsing). This software, and the product of Nsing described herein
+* (Hereinafter referred to as the Product) are owned by Nsing under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     Nsing does not grant any license under its patents, copyrights, trademarks, or other
+* intellectual property rights. Names and brands of third party may be mentioned or referred
+* thereto (if any) for identification purposes only.
+*
+*     Nsing reserves the right to make changes, corrections, enhancements, modifications, and
+* improvements to this software at any time without notice. Please contact Nsing and obtain
+* the latest version of this software before placing orders.
+
+*     Although Nsing has attempted to provide accurate and reliable information, Nsing assumes
+* no responsibility for the accuracy and reliability of this software.
+*
+*     It is the responsibility of the user of this software to properly design, program, and test
+* the functionality and safety of any application made of this information and any resulting product.
+* In no event shall Nsing be liable for any direct, indirect, incidental, special,exemplary, or
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     Nsing Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify Nsing and hold Nsing
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by Nsing, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     Nsing products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations.
+* User shall comply with any applicable export control laws and regulations promulgated and administered by
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+/**
+*\*\file n32wb033_adc.h
+*\*\author Nsing
+*\*\version v1.0.0
+*\*\copyright Copyright (c) 2026, Nsing Technologies Inc. All rights reserved.
+**/
+
+
+#ifndef __N32WB033_ADC_H__
+#define __N32WB033_ADC_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "n32wb033.h"
+#include <stdbool.h>
+
+
+/** ADC Init structure definition **/
+typedef struct
+{
+    FunctionalState MultiChEn; /* Specifies whether the conversion is performed in
+                                  Scan (multichannels) or Single (one channel) mode.  */
+
+    FunctionalState ContinueConvEn; /* Specifies whether the conversion is performed in
+                                       Continuous or Single mode. */
+    uint32_t ExtTrigSelect;  /* Set ADC group regular conversion trigger source:
+                                internal (SW start) or from external peripheral. */
+
+    uint32_t DatAlign;   /* Set ADC conversion data alignment.*/
+
+    uint8_t ChsNumber;   /* Set ADC group regular sequencer length.*/
+
+    uint32_t Resolution; /* Set ADC resolution*/
+} ADC_InitType;
+
+/** ADC offset structure definition **/
+typedef struct
+{
+    FunctionalState OffsetEn;       /* Set Offset enable or disable*/
+    FunctionalState OffsetSatenEn;  /* Set Offset satera*/
+    FunctionalState OffsetDirPositiveEn;
+    uint8_t  OffsetChannel;
+    uint16_t OffsetData;
+} ADC_OffsetType;
+
+typedef enum
+{
+    ADC_CALIBRATION_SINGLE_MODE = 0U,
+    ADC_CALIBRATION_DIFF_MODE   = 1U,
+} ADC_CALI_MOD;
+
+typedef enum
+{
+    ADC_CKMOD_HSI_DIV2 = 0U,
+    ADC_CKMOD_HSE      = 1U
+} ADC_CLKSRC;
+
+/** ADC CTRL1 MASK **/
+#define ADC_SCANMD_EN_MASK                        (ADC_CTRL1_SCANMD) /* Muti-channels enable mask */
+#define ADC_JAUTO_EN_MASK                         (ADC_CTRL1_AUTOJC) /* Automatic injected group conversion enable mask */
+
+#define ADC_DISC_REG_EN_MASK                      (ADC_CTRL1_DREGCH) /* ADC Discontinous mode enable on regluar channels mask */
+#define ADC_DISC_INJ_EN_MASK                      (ADC_CTRL1_DJCH) /* ADC Discontinous mode enable on injected channels mask */
+
+#define ADC_DISC_NUM_MASK                         (ADC_CTRL1_DCTU) /* ADC Discontinuous mode channel count */
+
+/**  ADC_channels_definition **/
+#define ADC_CH_MASK                               (ADC_CTRL1_AWDCH)
+#define ADC_CH_0                                  ((uint8_t)0x00U)
+#define ADC_CH_1                                  ((uint8_t)0x01U)
+#define ADC_CH_2                                  ((uint8_t)0x02U)
+#define ADC_CH_3                                  ((uint8_t)0x03U)
+#define ADC_CH_4                                  ((uint8_t)0x04U)
+#define ADC_CH_5                                  ((uint8_t)0x05U)
+#define ADC_CH_6                                  ((uint8_t)0x06U)
+#define ADC_CH_7                                  ((uint8_t)0x07U)
+#define ADC_CH_8                                  ((uint8_t)0x08U)
+#define ADC_CH_9                                  ((uint8_t)0x09U)
+#define ADC_CH_10                                 ((uint8_t)0x0AU)
+#define ADC_CH_11                                 ((uint8_t)0x0BU)
+#define ADC_CH_12                                 ((uint8_t)0x0CU)
+#define ADC_CH_13                                 ((uint8_t)0x0DU)
+#define ADC_CH_14                                 ((uint8_t)0x0EU)
+#define ADC_CH_15                                 ((uint8_t)0x0FU)
+#define ADC_CH_16                                 ((uint8_t)0x10U)
+#define ADC_CH_17                                 ((uint8_t)0x11U)
+#define ADC_CH_18                                 ((uint8_t)0x12U)
+
+#define ADC_Channel_00_TS_VREFINT                 (ADC_CH_0)  
+#define ADC_Channel_01_PB13                       (ADC_CH_1)  
+#define ADC_Channel_02_PB11                       (ADC_CH_2)  
+#define ADC_Channel_03_PB12                       (ADC_CH_3)  
+#define ADC_Channel_04_PB10                       (ADC_CH_4)  
+#define ADC_Channel_05_PB7                        (ADC_CH_5)  
+#define ADC_Channel_06_PB6                        (ADC_CH_6)  
+#define ADC_Channel_07_PB5                        (ADC_CH_7)  
+#define ADC_Channel_08_PB4                        (ADC_CH_8)  
+#define ADC_Channel_09_PB3                        (ADC_CH_9)  
+#define ADC_Channel_10_PB2                        (ADC_CH_10) 
+#define ADC_Channel_11_PB1                        (ADC_CH_11) 
+#define ADC_Channel_12_PB9                        (ADC_CH_12) 
+#define ADC_Channel_13_PB8                        (ADC_CH_13) 
+#define ADC_Channel_14_PB15                       (ADC_CH_14) 
+#define ADC_Channel_15_PB14                       (ADC_CH_15) 
+#define ADC_Channel_16_PC15                       (ADC_CH_16)
+#define ADC_Channel_17_VSSA                       (ADC_CH_17)
+#define ADC_Channel_18_VDDA                       (ADC_CH_18)
+
+/**  ADC_analog_watchdog_selection **/
+#define ADC_ANALOG_WTDG_SINGLEREG_ENABLE          (ADC_CTRL1_AWDSGLEN | ADC_CTRL1_AWDERCH)
+#define ADC_ANALOG_WTDG_SINGLEINJEC_ENABLE        (ADC_CTRL1_AWDSGLEN | ADC_CTRL1_AWDEJCH)
+#define ADC_ANALOG_WTDG_SINGLEREG_OR_INJEC_ENABLE (ADC_CTRL1_AWDSGLEN | ADC_CTRL1_AWDERCH | ADC_CTRL1_AWDEJCH)
+#define ADC_ANALOG_WTDG_ALLREG_ENABLE             (ADC_CTRL1_AWDERCH)
+#define ADC_ANALOG_WTDG_ALLINJEC_ENABLE           (ADC_CTRL1_AWDEJCH)
+#define ADC_ANALOG_WTDG_ALLREG_ALLINJEC_ENABLE    (ADC_CTRL1_AWDERCH | ADC_CTRL1_AWDEJCH)
+#define ADC_ANALOG_WTDG_NONE                      ((uint32_t)0x00000000U)
+
+/** ADC CTRL2 MASK **/
+#define ADC_ON_EN_MASK                            (ADC_CTRL2_ON) /* ADC enable mask */
+#define ADC_CONT_EN_MASK                          (ADC_CTRL2_CTU) /* ADC continuous conversion mask */
+#define ADC_CALI_EN_MASK                          (ADC_CTRL2_ENCAL) /* A/D start calibration mask */
+
+/** ADC_Regular_Group_Trigger_Source **/
+#define ADC_EXT_TRIG_REG_CONV_MASK                (ADC_CTRL2_EXTRSEL_MASK | ADC_CTRL2_TRIG)
+#define ADC_EXT_TRIG_REG_CONV_ATIM1_CC1           (ADC_CTRL2_TRIG)
+#define ADC_EXT_TRIG_REG_CONV_ATIM1_CC2           (ADC_CTRL2_EXTRSEL_0 | ADC_CTRL2_TRIG)
+#define ADC_EXT_TRIG_REG_CONV_ATIM1_CC3           (ADC_CTRL2_EXTRSEL_1 | ADC_CTRL2_TRIG)
+#define ADC_EXT_TRIG_REG_CONV_GTIM1_CC1           (ADC_CTRL2_EXTRSEL_0 | ADC_CTRL2_EXTRSEL_1 | ADC_CTRL2_TRIG)
+#define ADC_EXT_TRIG_REG_CONV_GTIM1_CC2           (ADC_CTRL2_EXTRSEL_2 | ADC_CTRL2_TRIG)
+#define ADC_EXT_TRIG_REG_CONV_GTIM1_TRGO          (ADC_CTRL2_EXTRSEL_0 | ADC_CTRL2_EXTRSEL_2 | ADC_CTRL2_TRIG)
+#define ADC_EXT_TRIG_REG_CONV_EXTI_LINE0_15_OR_ATIM1_TRGO       (ADC_CTRL2_EXTRSEL_1 | ADC_CTRL2_EXTRSEL_2 | ADC_CTRL2_TRIG)
+#define ADC_EXT_TRIG_REG_CONV_SOFTWARE            (ADC_CTRL2_EXTRSEL | ADC_CTRL2_TRIG)
+
+/** ADC_Injected_Group_Trigger_Source **/
+#define ADC_EXT_TRIG_INJ_CONV_MASK                (ADC_CTRL2_EXTJSEL_MASK | ADC_CTRL2_JTRIG)
+#define ADC_EXT_TRIG_INJ_CONV_ATIM1_TRGO          (ADC_CTRL2_JTRIG)
+#define ADC_EXT_TRIG_INJ_CONV_ATIM1_CC4           (ADC_CTRL2_EXTJSEL_0 | ADC_CTRL2_JTRIG)
+#define ADC_EXT_TRIG_INJ_CONV_ATIM1_CC5           (ADC_CTRL2_EXTJSEL_1 | ADC_CTRL2_JTRIG)
+#define ADC_EXT_TRIG_INJ_CONV_ATIM1_CC6           (ADC_CTRL2_EXTJSEL_0 | ADC_CTRL2_EXTJSEL_1 | ADC_CTRL2_JTRIG)
+#define ADC_EXT_TRIG_INJ_CONV_ATIM1_CC7           (ADC_CTRL2_EXTJSEL_2 | ADC_CTRL2_JTRIG)
+#define ADC_EXT_TRIG_INJ_CONV_GTIM1_CC3           (ADC_CTRL2_EXTJSEL_0 | ADC_CTRL2_EXTJSEL_2 | ADC_CTRL2_JTRIG)
+#define ADC_EXT_TRIG_INJ_CONV_EXTI_LINE0_15_OR_GTIM1_TRGO       (ADC_CTRL2_EXTJSEL_1 | ADC_CTRL2_EXTJSEL_2 | ADC_CTRL2_JTRIG)
+#define ADC_EXT_TRIG_INJ_CONV_SOFTWARE            (ADC_CTRL2_EXTJSEL   | ADC_CTRL2_JTRIG)
+
+/**  ADC DMA Mode **/
+#define ADC_DMAEN_MASK                            (ADC_CTRL2_DMAEN)
+/**  ADC_data_align **/
+#define ADC_DAT_ALIGN_MASK                        (ADC_CTRL2_ALIG)
+#define ADC_DAT_ALIGN_R                           ((uint32_t)0x00000000U)
+#define ADC_DAT_ALIGN_L                           (ADC_CTRL2_ALIG)
+
+#define ADC_TS_EN_MASK                            (ADC_CTRL2_TEMPEN)  /**  ADC temper sensor enable  **/
+
+#define ADC_INJ_SWSTART_MASK                      (ADC_CTRL2_SWSTRJCH)/**  Start conversion of injected channels  **/
+#define ADC_REG_SWSTART_MASK                      (ADC_CTRL2_SWSTRRCH)/**  Start conversion of regular channels  **/
+
+
+/**  ADC_channel_mode_definition **/
+#define ADC_SINGLE_ENDED                          ((uint32_t)0x00U)     /**  signal-ended mode **/
+#define ADC_DIFFERENTIAL_ENDED                    ((uint32_t)0x01U)     /**  differential mode **/
+
+#define ADC_DATA_RES_MASK                         (ADC_CTRL3_RES)
+#define ADC_DATA_RES_6BIT                         ((uint32_t)0x00000000U)
+#define ADC_DATA_RES_8BIT                         (ADC_CTRL3_RES_0)
+#define ADC_DATA_RES_10BIT                        (ADC_CTRL3_RES_1)
+#define ADC_DATA_RES_12BIT                        (ADC_CTRL3_RES_1 | ADC_CTRL3_RES_0)
+
+#define ADC_CAL_AUTO_LOAD_MASK                    (ADC_CTRL3_CALALD)
+#define ADC_CAL_DIFF_MODE_MASK                    (ADC_CTRL3_CALDIF) /** ADC differential mode bit mask **/
+/**  ADC_sampling_time (3-bit encoding per channel, SMPSEL=0 default) **/
+#define ADC_SAMP_TIME_CYCLES_MASK                 (ADC_SAMPT1_SAMP0)
+
+#define ADC_SAMP_TIME_CYCLES0_1_5                  ((uint8_t)0x00U)  /* 1.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES0_7_5                  ((uint8_t)0x01U)  /* 7.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES0_13_5                 ((uint8_t)0x02U)  /* 13.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES0_28_5                 ((uint8_t)0x03U)  /* 28.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES0_41_5                 ((uint8_t)0x04U)  /* 41.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES0_55_5                 ((uint8_t)0x05U)  /* 55.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES0_71_5                 ((uint8_t)0x06U)  /* 71.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES0_239_5                ((uint8_t)0x07U)  /* 239.5 ADC clock cycles */
+
+#define ADC_SAMP_TIME_CYCLES1_1_5                  ((uint8_t)0x00U)  /* 1.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES1_2_5                  ((uint8_t)0x01U)  /* 2.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES1_4_5                  ((uint8_t)0x02U)  /* 4.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES1_7_5                  ((uint8_t)0x03U)  /* 7.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES1_19_5                 ((uint8_t)0x04U)  /* 19.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES1_61_5                 ((uint8_t)0x05U)  /* 61.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES1_181_5                ((uint8_t)0x06U)  /* 181.5 ADC clock cycles */
+#define ADC_SAMP_TIME_CYCLES1_601_5                ((uint8_t)0x07U)  /* 601.5 ADC clock cycles */
+
+#define ADC_OVERSAMPE_RATE_TIMES_MASK             (ADC_CTRL3_OSR)    /**ADC oversampling ratio times bit mask **/
+#define ADC_OVERSAMPE_RATE_TIMES_1                ((uint32_t)0x00000000U)
+#define ADC_OVERSAMPE_RATE_TIMES_2                ((uint32_t)0x00000001U << (uint32_t)12U)
+#define ADC_OVERSAMPE_RATE_TIMES_4                ((uint32_t)0x00000002U << (uint32_t)12U)
+#define ADC_OVERSAMPE_RATE_TIMES_8                ((uint32_t)0x00000003U << (uint32_t)12U)
+#define ADC_OVERSAMPE_RATE_TIMES_16               ((uint32_t)0x00000004U << (uint32_t)12U)
+#define ADC_OVERSAMPE_RATE_TIMES_32               ((uint32_t)0x00000005U << (uint32_t)12U)
+#define ADC_OVERSAMPE_RATE_TIMES_64               ((uint32_t)0x00000006U << (uint32_t)12U)
+#define ADC_OVERSAMPE_RATE_TIMES_128              ((uint32_t)0x00000007U << (uint32_t)12U)
+#define ADC_OVERSAMPE_RATE_TIMES_256              ((uint32_t)0x00000008U << (uint32_t)12U)
+
+#define ADC_OVERSAMPE_DATA_SHIFT_MASK             (ADC_CTRL3_OSS)    /**ADC oversampling data right shift bit mask **/
+#define ADC_OVERSAMPE_DATA_SHIFT_0                (((uint32_t)0x00000000U) << (uint32_t)16U)
+#define ADC_OVERSAMPE_DATA_SHIFT_1                (((uint32_t)0x00000001U) << (uint32_t)16U)
+#define ADC_OVERSAMPE_DATA_SHIFT_2                (((uint32_t)0x00000002U) << (uint32_t)16U)
+#define ADC_OVERSAMPE_DATA_SHIFT_3                (((uint32_t)0x00000003U) << (uint32_t)16U)
+#define ADC_OVERSAMPE_DATA_SHIFT_4                (((uint32_t)0x00000004U) << (uint32_t)16U)
+#define ADC_OVERSAMPE_DATA_SHIFT_5                (((uint32_t)0x00000005U) << (uint32_t)16U)
+#define ADC_OVERSAMPE_DATA_SHIFT_6                (((uint32_t)0x00000006U) << (uint32_t)16U)
+#define ADC_OVERSAMPE_DATA_SHIFT_7                (((uint32_t)0x00000007U) << (uint32_t)16U)
+#define ADC_OVERSAMPE_DATA_SHIFT_8                (((uint32_t)0x00000008U) << (uint32_t)16U)
+
+#define ADC_OVERSAMPE_REG_EN_MASK                 (ADC_CTRL3_OSRE)    /**ADC oversampling on regular channels **/
+#define ADC_OVERSAMPE_INJ_EN_MASK                 (ADC_CTRL3_OSJE)    /**ADC oversampling on injected channels **/
+#define ADC_OVERSAMPE_TRIG_REG_MASK               (ADC_CTRL3_OSRTRIG) /**ADC oversampling trigger mode on regular channels **/
+#define ADC_OVERSAMPE_MODE_MASK                   (ADC_CTRL3_OSRMD)   /**ADC oversampling mode on regular channels **/
+/**Oversample scope **/
+#define ADC_OVERSAMPE_DISABLE                     ((uint32_t)0x00000000U)
+#define ADC_OVERSAMPE_REGULAR_CONTINUED           (ADC_OVERSAMPE_REG_EN_MASK)
+#define ADC_OVERSAMPE_REGULAR_RESUMED             (ADC_OVERSAMPE_MODE_MASK | ADC_OVERSAMPE_REG_EN_MASK)
+#define ADC_OVERSAMPE_INJECTED                    (ADC_OVERSAMPE_INJ_EN_MASK)
+#define ADC_OVERSAMPE_REGULAR_INJECTED            (ADC_OVERSAMPE_REG_EN_MASK | ADC_OVERSAMPE_INJ_EN_MASK)
+
+/**  ADC_offset_channel_offset **/
+#define ADC_REGESTER_OFFSET_1                     ((uint8_t)0x14U)
+#define ADC_REGESTER_OFFSET_2                     ((uint8_t)0x18U)
+#define ADC_REGESTER_OFFSET_3                     ((uint8_t)0x1CU)
+#define ADC_REGESTER_OFFSET_4                     ((uint8_t)0x20U)
+
+#define ADC_OFFSET_EN_MASK                        (ADC_OFFSET1_OFFSCH1EN)
+#define ADC_OFFSET_CH_MASK                        (ADC_OFFSET1_OFFSCH1CH)
+#define ADC_OFFSET_SATEN_EN_MASK                  (ADC_OFFSET1_OFFSCH1SATEN)
+#define ADC_OFFSET_DIR_MASK                       (ADC_OFFSET1_OFFSCH1DIR)
+#define ADC_OFFSET_DATA_MASK                      (ADC_OFFSET1_OFFSCH1DAT)
+
+/**  ADC regular sequence **/
+#define ADC_RESQ_SEQ_MASK                         (ADC_RSEQ3_SEQ1)
+
+/**  ADC inject sequence **/
+#define ADC_JESQ_LEN_MASK                         (ADC_JSEQ_JLEN)
+#define ADC_JESQ_SEQ_MASK                         (ADC_JSEQ_JSEQ1)
+
+
+#define ADC_INJECT_DATA_OFFSET_1                  ((uint8_t)0x3CU)
+#define ADC_INJECT_DATA_OFFSET_2                  ((uint8_t)0x40U)
+#define ADC_INJECT_DATA_OFFSET_3                  ((uint8_t)0x44U)
+#define ADC_INJECT_DATA_OFFSET_4                  ((uint8_t)0x48U)
+
+/**  ADC_PCTRL_definition **/
+#define ADC_PCTRL_EXPEN_MASK                      (ADC_PCTRL_EXTPEN)
+#define ADC_PCTRL_RANGESEL_MASK                   (ADC_PCTRL_RANGESEL)
+#define ADC_PCTRL_VREFLDOEN_MASK                  (ADC_PCTRL_VREFLDOEN)
+
+#define ADC_EXTERN_POWER_SUPPORT                  (ADC_PCTRL_EXTPEN | ADC_PCTRL_VREFLDOEN) 
+#define ADC_INTERN_POWER_SUPPORT                  (ADC_PCTRL_VREFLDOEN) 
+
+/**  ADC_flags_definition **/
+#define ADC_FLAG_ALL_MASK                         (0xFFU)
+#define ADC_FLAG_ENDC                             ((uint16_t)ADC_STS_ENDC)
+#define ADC_FLAG_ENDCA                            ((uint16_t)ADC_STS_ENDCA)
+#define ADC_FLAG_JENDC                            ((uint16_t)ADC_STS_JENDC)
+#define ADC_FLAG_JENDCA                           ((uint16_t)ADC_STS_JENDCA)
+#define ADC_FLAG_AWDG                             ((uint16_t)ADC_STS_AWDG)
+#define ADC_FLAG_TCFLAG                           ((uint16_t)ADC_STS_TCFLAG)
+#define ADC_FLAG_STR                              ((uint16_t)ADC_STS_STR)
+#define ADC_FLAG_JSTR                             ((uint16_t)ADC_STS_JSTR)
+#define ADC_FLAG_RDY                              ((uint16_t)ADC_CTRL3_RDY)
+#define ADC_FLAG_PD_RDY                           ((uint16_t)ADC_CTRL3_PDRDY)
+
+/**  ADC_interrupts_definition **/
+
+#define ADC_INT_CTRL3_MASK                        ((uint16_t)(ADC_CTRL3_ENDCAIEN | ADC_CTRL3_JENDCAIEN))
+#define ADC_INT_CTRL1_MASK                        ((uint16_t)ADC_CTRL1_ENDCIEN | ADC_CTRL1_AWDIEN | ADC_CTRL1_JENDCIEN)
+
+#define ADC_INT_ENDC                              ((uint16_t)0x0202U)
+#define ADC_INT_AWDG                              ((uint16_t)0x0401U)
+#define ADC_INT_JENDC                             ((uint16_t)0x0804U)
+#define ADC_INT_ENDCA                             ((uint16_t)0x1020U)
+#define ADC_INT_JENDCA                            ((uint16_t)0x2040U)
+
+
+/*** ADC Driving Functions Declaration ***/
+
+/* Reset and initialization */
+void ADC_DeInit(void);
+void ADC_Init(const ADC_InitType* ADC_InitParam);
+void ADC_InitStruct(ADC_InitType* ADC_InitParam);
+void ADC_Enable(FunctionalState Cmd);
+void ADC_EnableDMA(FunctionalState Cmd);
+
+/* Regular conversion control */
+void ADC_EnableSoftwareStartConv(FunctionalState Cmd);
+FlagStatus ADC_GetSoftwareStartConvStatus(void);
+void ADC_ConfigRegularChannel(uint8_t ADC_Channel, uint8_t Rank, uint8_t ADC_SampleTime);
+uint16_t ADC_GetDat(void);
+void ADC_ConfigDiscModeChannelCount(uint8_t Number);
+void ADC_EnableDiscMode(FunctionalState Cmd);
+
+/* Injected conversion control */
+void ADC_EnableSoftwareStartInjectedConv(FunctionalState Cmd);
+FlagStatus ADC_GetSoftwareStartInjectedConvCmdStatus(void);
+void ADC_ConfigInjectedChannel(uint8_t ADC_Channel, uint8_t Rank, uint8_t ADC_SampleTime);
+void ADC_ConfigInjectedSequencerLength(uint8_t Length);
+uint16_t ADC_GetInjectedConversionDat(uint8_t ADC_InjectedChannel);
+void ADC_EnableAutoInjectedConv(FunctionalState Cmd);
+void ADC_EnableInjectedDiscMode(FunctionalState Cmd);
+
+/* Trigger configuration */
+void ADC_ConfigExternalTrigInjectedConv(uint32_t ADC_ExternalTrigInjecConv);
+void ADC_ConfigExternalTrigRegularConv(uint32_t ADC_ExternalTrigRegularConv);
+
+/* Analog watchdog configuration */
+void ADC_ConfigAnalogWatchdogWorkChannelType(uint32_t ADC_AnalogWatchdog);
+void ADC_ConfigAnalogWatchdogThresholds(uint16_t HighThreshold, uint16_t LowThreshold);
+void ADC_ConfigAnalogWatchdogSingleChannel(uint8_t ADC_Channel);
+
+/* Temperature sensor*/
+void ADC_EnableTempSensor(FunctionalState Cmd);
+void ADC_EnableVrefint(FunctionalState Cmd);
+
+/* Oversampling configuration */
+void ADC_ConfigOverSamplingRatioAndShift(uint32_t Ratio, uint32_t Shift);
+void ADC_SetOverSamplingScope(uint32_t OversampleScope);
+void ADC_EnableOverSamplingDiscont(FunctionalState Cmd);
+
+/* Offset configuration */
+void ADC_SetOffsetConfig(uint8_t ADC_Offset, const ADC_OffsetType* ADC_OffsetStruct);
+void ADC_GetOffsetConfig(uint8_t ADC_Offset, ADC_OffsetType* ADC_OffsetStruct);
+
+/* Interrupt and flag management */
+FlagStatus ADC_GetFlagStatus(uint16_t ADC_FLAG);
+void ADC_ClearFlag(uint16_t ADC_FLAG);
+FlagStatus ADC_GetFlagStatusNew(uint16_t ADC_FLAG_NEW);
+void ADC_ConfigInt(uint16_t ADC_IT, FunctionalState Cmd);
+INTStatus ADC_GetIntStatus(uint16_t ADC_IT);
+void ADC_ClearIntPendingBit(uint16_t ADC_IT);
+
+
+/* Calibration */
+void ADC_CalibrationOperation(ADC_CALI_MOD cali_mode);
+FlagStatus ADC_GetCalibrationStatus(ADC_CALI_MOD cali_mode);
+void ADC_SetBypassCalibration(FunctionalState Cmd);
+void ADC_EnableCalibrationAutoLoad(FunctionalState Cmd);
+void ADC_SetCalibrationFactor(uint32_t SingleDiff, uint32_t CalibrationFactor);
+void ADC_GetCalibrationFactor(uint8_t* CalFactS, uint8_t* CalFactD);
+
+/* Differential mode  */
+void ADC_SetChannelSingleDiff(uint32_t Channel, uint32_t SingleDiff);
+
+/* Power control  */
+void ADC_ConfigADCPowerSupport(uint32_t ADC_PowerSupportSel);
+void ADC_EnableDeepSleepMode(FunctionalState Cmd);
+
+/* Channel sample time select */
+void ADC_ConfigSampleTimeSelect(FunctionalState Cmd);
+
+/* Conversion resolution bit num set */
+void ADC_SetConvResultBitNum(uint32_t ResultBitNum);
+
+/* Clock configuration */
+void ADC_ConfigClk(ADC_CLKSRC ADC_ClkMode, uint32_t ADC_CLKPre, uint32_t ADC_1MCLKPre);
+
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /*__N32WB033_ADC_H__ */

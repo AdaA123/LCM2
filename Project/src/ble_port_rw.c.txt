@@ -1,0 +1,1677 @@
+#include "ble_port_rw.h"
+#include "sys_platform.h"
+#include "stream.h"
+#include "ns_ble.h"
+#include "app_rdtss.h"
+#include "app_rdtsc.h"
+#include "app_svc.h"
+#include "ke_msg.h"
+#include "ke_task.h"
+#include "ke_timer.h"
+#include "rwip.h"
+#include "rwip_config.h"
+#include "rwip_task.h"
+#include "prf.h"
+#include "gapc_task.h"
+#include "gapm_task.h"
+#include "rdts_client_task.h"
+#include "ns_log.h"
+#include "ns_sec.h"
+#include "app_user_config.h"
+#include <string.h>
+
+#define SYS_PLATFORM_MESSAGE_BASE   ((uint16_t)(TASK_FIRST_MSG(TASK_APP) + 49u))//任务id基址
+#define SYS_PLATFORM_MESSAGE_COUNT  32u//任务数长度
+#define SYS_PLATFORM_TIMER_MIN_MS   1u//任务最小时间
+#define BLE_PORT_FIXED_PASSKEY      123456u  // 对端要求输入passkey时自动回复的固定PIN
+#define SYS_PLATFORM_TIMER_MAX_MS   41943000u//任务最大时间
+#define BLE_PORT_RADIO_TX_POWER     TX_POWER_Pos6_DBM //最大射频
+#define BLE_PORT_DEVICE_ROLE_ALL    0x0Fu//角色掩码
+
+static sys_platform_message_handler_t s_platform_message_handler;//核心事件回调函数指针
+static uint32_t s_platform_posted_mask;//任务挂起掩码
+static uint8_t s_platform_registered;//任务就绪标志位
+
+
+static uint8_t platform_message_id_is_valid(uint16_t message_id)
+{
+    return (uint8_t)((message_id > 0u) && (message_id <= SYS_PLATFORM_MESSAGE_COUNT));
+}
+
+static uint32_t platform_message_bit(uint16_t message_id)
+{
+    return (uint32_t)1u << (message_id - 1u);
+}
+
+static ke_msg_id_t platform_message_encode(uint16_t message_id)
+{
+    return (ke_msg_id_t)(SYS_PLATFORM_MESSAGE_BASE + message_id);
+}
+
+static uint8_t platform_message_decode(uint16_t platform_message_id, uint16_t *message_id)
+{
+    uint16_t offset;
+
+    if((message_id == 0) || (platform_message_id <= SYS_PLATFORM_MESSAGE_BASE))
+        return 0u;
+
+    offset = (uint16_t)(platform_message_id - SYS_PLATFORM_MESSAGE_BASE);
+
+    if(offset > SYS_PLATFORM_MESSAGE_COUNT)
+        return 0u;
+
+    *message_id = offset;
+    return 1u;
+}
+
+int SysPlatform_MessageDispatch(uint16_t platform_message_id, void const *parameter)
+{
+    uint16_t message_id;
+
+    if(platform_message_decode(platform_message_id, &message_id) == 0u)
+        return SYS_PLATFORM_ERR_PARAM;
+
+    s_platform_posted_mask &= ~platform_message_bit(message_id);
+
+    if(s_platform_message_handler != 0)
+        s_platform_message_handler(message_id, parameter);
+
+    return SYS_PLATFORM_OK;
+}
+
+static int platform_task_message_handler(ke_msg_id_t const message_id, void const *parameter, ke_task_id_t const destination_id, ke_task_id_t const source_id)
+{
+    (void)destination_id;
+    (void)source_id;
+    (void)SysPlatform_MessageDispatch((uint16_t)message_id, parameter);
+    return KE_MSG_CONSUMED;
+}
+
+static const struct ke_msg_handler s_platform_message_handlers[] =
+{
+    {
+        KE_MSG_DEFAULT_HANDLER,
+        (ke_msg_func_t)platform_task_message_handler
+    }
+};
+
+static const struct app_subtask_handlers s_platform_task_handlers =
+{
+    &s_platform_message_handlers[0],
+    1u
+};
+
+int SysPlatform_Initialize(void)
+{
+    struct prf_task_t platform_task;
+
+    if(s_platform_registered != 0u)
+        return SYS_PLATFORM_OK;
+
+    platform_task.prf_task_id = TASK_APP;
+    platform_task.prf_task_handler = &s_platform_task_handlers;
+
+    if(ns_ble_prf_task_register(&platform_task) == false)
+        return SYS_PLATFORM_ERR_STATE;
+
+    s_platform_registered = 1u;
+    return SYS_PLATFORM_OK;
+}
+
+int SysPlatform_MessageHandlerSet(sys_platform_message_handler_t handler)
+{
+    if(handler != s_platform_message_handler)
+        s_platform_posted_mask = 0u;
+
+    s_platform_message_handler = handler;
+    return SYS_PLATFORM_OK;
+}
+
+int SysPlatform_TimerSet(uint16_t message_id, uint32_t delay_ms)
+{
+    if((platform_message_id_is_valid(message_id) == 0u) || (delay_ms < SYS_PLATFORM_TIMER_MIN_MS) || (delay_ms >= SYS_PLATFORM_TIMER_MAX_MS))
+        return SYS_PLATFORM_ERR_PARAM;
+
+    ke_timer_set(platform_message_encode(message_id), TASK_APP, delay_ms);
+    return SYS_PLATFORM_OK;
+}
+
+int SysPlatform_TimerClear(uint16_t message_id)
+{
+    if(platform_message_id_is_valid(message_id) == 0u)
+        return SYS_PLATFORM_ERR_PARAM;
+
+    ke_timer_clear(platform_message_encode(message_id), TASK_APP);
+    return SYS_PLATFORM_OK;
+}
+
+int SysPlatform_MessagePost(uint16_t message_id)
+{
+    uint32_t bit;
+
+    if(platform_message_id_is_valid(message_id) == 0u)
+        return SYS_PLATFORM_ERR_PARAM;
+
+    bit = platform_message_bit(message_id);
+
+    if((s_platform_posted_mask & bit) != 0u)
+        return SYS_PLATFORM_OK;
+
+    ke_timer_clear(platform_message_encode(message_id), TASK_APP);
+    s_platform_posted_mask |= bit;
+    ke_msg_send_basic(platform_message_encode(message_id), TASK_APP, TASK_APP);
+    return SYS_PLATFORM_OK;
+}
+
+void SysPlatform_Schedule(void)
+{
+    rwip_schedule();
+}
+
+typedef struct
+{
+    char     device_name[APP_DEVICE_NAME_MAX_LEN];  /**< 本地从机对外广播的蓝牙设备名称 */
+    uint8_t  mac_msb[6];                            /**< 本机蓝牙物理 MAC 地址 */
+    uint8_t  mac_addr_type;                         /**< MAC 地址类型 */
+    uint8_t  device_role;                           /**< 蓝牙角色掩码 */
+    uint16_t att_cfg;                               /**< ATT/GATT 配置属性标志位 */
+    uint16_t connection_interval_min;               /**< 期望的最小连接间隔 */
+    uint16_t connection_interval_max;               /**< 期望的最大连接间隔 */
+    uint16_t connection_latency;                    /**< 从机潜伏周期/延迟跳过次数 */
+    uint16_t supervision_timeout;                   /**< 链路监督超时时间 */
+    uint16_t connection_update_delay_ms;            /**< 建连后延迟发起连接参数更新请求的时间 */
+    uint8_t  advertising_data[ADV_DATA_LEN];        /**< 广播数据包缓冲区 */
+    uint8_t  advertising_length;                    /**< 广播数据包长度 */
+    uint16_t advertising_interval_625us;            /**< 广播间隔 */
+    uint16_t scan_interval_10ms;                    /**< 扫描间隔 */
+    uint16_t scan_window_10ms;                      /**< 扫描窗口大小 */
+    uint8_t  active_scan;                           /**< 是否开启主动扫描 */
+} ble_port_config_t;
+
+typedef struct
+{
+    uint8_t type;/**< 过滤类型 (如 0=不过滤, 1=按MAC地址过滤, 2=按设备名过滤) */
+    union
+    {
+        uint8_t address_le[6];
+        char    name[32];
+    } value;
+} ble_port_scan_filter_t;//过滤条件
+
+#define BLE_PORT_STREAM_CAPACITY       2048u    /**< 端点数据环形缓冲区 (RX/TX RingBuffer) 容量 (2KB) */
+#define BLE_PORT_TX_STAGE_CAPACITY     247u     /**< 单次空口发送暂存分片区容量 (匹配 BLE 4.2+ 最大 ATT MTU) */
+#define BLE_PORT_BOUNDARY_CAPACITY     64u      /**< 帧边界环形队列深度 (最多记录 64 包未读帧的独立长度) */
+#define BLE_PORT_CONN_INDEX_INVALID    0xFFu    /**< 无效或未分配的底层连接索引号 (Connection Index) */
+#define BLE_PORT_ATT_MTU_DEFAULT       23u      /**< 蓝牙默认 ATT MTU 大小 (未交换 MTU 时的基础值) */
+#define BLE_PORT_ATT_PAYLOAD_DEFAULT   20u      /**< 默认单包最大有效载荷大小 (MTU 23 - 3字节 ATT Header) */
+
+typedef enum
+{
+    BLE_ADV_IDLE = 0,   /**< 广播空闲/已停止 */
+    BLE_ADV_STARTING,   /**< 正在请求开启广播 */
+    BLE_ADV_ACTIVE,     /**< 广播中 */
+    BLE_ADV_STOPPING    /**< 正在请求终止广播 */
+} ble_adv_activity_t;
+
+typedef enum
+{
+    BLE_SCAN_IDLE = 0,  /**< 扫描空闲/未开启 */
+    BLE_SCAN_ACTIVE,     /**< 扫描中 */
+    BLE_SCAN_STARTING,
+    BLE_SCAN_STOPPING
+} ble_scan_activity_t;
+
+typedef enum
+{
+    BLE_INIT_IDLE = 0,   /**< 连接器空闲 */
+    BLE_INIT_CONNECTING, /**< 正在发起连接 */
+    BLE_INIT_CANCELING   /**< 正在取消当前连接 */
+} ble_init_activity_t;
+
+typedef struct
+{
+    ble_adv_activity_t  advertising; /**< 广播状态机 */
+    ble_scan_activity_t scanning;    /**< 扫描状态机 */
+    ble_init_activity_t initiating;  /**< 连接状态机 */
+} ble_port_activity_t;
+
+struct ble_port_ctx;
+
+typedef struct
+{
+    device_t            device;                               /**< 设备对象 */
+    stream_t            stream;                               /**< 数据流 */
+    struct ble_port_ctx *port;                                /**< 端口 */
+    uint8_t             rx_storage[BLE_PORT_STREAM_CAPACITY]; /**< 接收缓冲区 */
+    uint8_t             tx_storage[BLE_PORT_STREAM_CAPACITY]; /**< 发送缓冲区 */
+    uint8_t             tx_stage[BLE_PORT_TX_STAGE_CAPACITY]; /**< 发送缓冲区 */
+    uint16_t            boundary[BLE_PORT_BOUNDARY_CAPACITY]; /**< 缓冲区队列 */
+    uint8_t             boundary_head;                        /**< 头指针 */
+    uint8_t             boundary_tail;                        /**< 尾指针 */
+    ble_endpoint_id_t   id;                                   /**< 设备ID */
+    uint8_t             conn_index;                           /**< 连接句柄 */
+    uint8_t             linked;                               /**< 连接状态 */
+    uint8_t             tx_ready;                             /**< 发送就绪 */
+    uint16_t            att_mtu;                              /**< MTU 大小 */
+    uint16_t            connection_generation;                /**< 重连计数 */
+    uint16_t            inflight_link_generation;             /**< 废弃断线残包 */
+    uint16_t            tx_token_next;                        /**< 发送事务令牌递增生成器 */
+    uint16_t            tx_token_inflight;                    /**< 正在空口中传输的数据包事务令牌编号 */
+    uint8_t             peer_mac_msb[6];                      /**< 已连接的 MAC 地址 */
+} ble_endpoint_ctx_t;
+
+typedef struct ble_port_ctx
+{
+    ble_endpoint_ctx_t     endpoint[BLE_ENDPOINT_COUNT]; /**< 当前对象 */
+    ble_port_config_t      config;                       /**< 当前配置参数 */
+    ble_port_activity_t    activity;                     /**< 当前状态 */
+    uint8_t                scan_report_mac_msb[6];       /**< 当前 MAC 地址 */
+    uint8_t                ready_fired;                  /**< 当前是否已进入ready */
+    uint8_t                configured;                   /**< 当前配置生效 */
+    uint8_t                stack_up;                     /**< 当前蓝牙已经生效 */
+    uint8_t                pending_adv_stop;             /**< 当前广播是否已停止 */
+    uint8_t                strict_scan_enabled;
+    uint8_t                pending_scan_start;
+    uint8_t                pending_adv_command;
+    ble_port_scan_filter_t scan_filter;                  /**< 当前连接方式 */
+    ble_port_event_cb_t    event_callback;               /**< 向业务层投递端口事件的回调函数指针 */
+    void                  *event_user_data;              /**< 回调伴随的业务层上下文指针 */
+} ble_port_ctx_t;
+
+typedef struct
+{
+    uint8_t valid;
+    uint8_t addr_type;
+    uint8_t addr_le[6];
+} ble_port_connect_request_t;
+
+static ble_port_ctx_t s_port;
+
+static ble_port_connect_request_t s_connect_request;
+
+static int rw_stack_start(void);
+static int rw_control(struct device *dev, int cmd, void *arg);
+static int endpoint_submit(void *context, const uint8_t *data, uint16_t length);
+static void port_strict_activity_process(void);
+static void port_pending_connect_start(void);
+static void port_central_idle_emit(void);
+
+//获取设备id
+static ble_endpoint_ctx_t *endpoint_get(ble_endpoint_id_t id)
+{
+    return (id < BLE_ENDPOINT_COUNT) ? &s_port.endpoint[id] : 0;
+}
+
+//获取设备上下文
+static ble_endpoint_ctx_t *endpoint_from_device(device_t *device)
+{
+    uint8_t index;
+
+    for (index = 0u; index < BLE_ENDPOINT_COUNT; index++)
+    {
+        if ((device == &s_port.endpoint[index].device) && (s_port.endpoint[index].port == &s_port))
+            return &s_port.endpoint[index];
+    }
+
+    return 0;
+}
+
+static uint8_t endpoint_is_connected(const ble_endpoint_ctx_t *endpoint)
+{
+    return (uint8_t)((endpoint != 0) &&
+                     (endpoint->linked != 0u) &&
+                     (endpoint->conn_index != BLE_PORT_CONN_INDEX_INVALID));
+}
+
+static uint8_t endpoint_tx_sendable(const ble_endpoint_ctx_t *endpoint)
+{
+    if (endpoint_is_connected(endpoint) == 0u)
+        return 0u;
+
+    return (uint8_t)((endpoint->id != BLE_ENDPOINT_PHONE) || (endpoint->tx_ready != 0u));
+}
+
+static uint8_t endpoint_conn_index(ble_endpoint_id_t id)
+{
+    ble_endpoint_ctx_t *endpoint = endpoint_get(id);
+    return (endpoint_is_connected(endpoint) != 0u) ? endpoint->conn_index : BLE_PORT_CONN_INDEX_INVALID;
+}
+
+static ble_endpoint_id_t endpoint_id_from_conn_index(uint8_t conn_index)
+{
+    uint8_t index;
+
+    for (index = 0u; index < BLE_ENDPOINT_COUNT; index++)
+    {
+        if ((endpoint_is_connected(&s_port.endpoint[index]) != 0u) && (s_port.endpoint[index].conn_index == conn_index))
+            return s_port.endpoint[index].id;
+    }
+
+    return BLE_ENDPOINT_INVALID;
+}
+
+static void endpoint_mtu_reset(ble_endpoint_ctx_t *endpoint)
+{
+    endpoint->att_mtu = BLE_PORT_ATT_MTU_DEFAULT;
+    (void)Stream_TxSubmitLimitSet(&endpoint->stream, BLE_PORT_ATT_PAYLOAD_DEFAULT);
+}
+
+static void endpoint_generation_advance(ble_endpoint_ctx_t *endpoint)
+{
+    endpoint->connection_generation++;
+
+    if (endpoint->connection_generation == 0u)
+        endpoint->connection_generation = 1u;
+}
+
+static uint16_t endpoint_tx_token_allocate(ble_endpoint_ctx_t *endpoint)
+{
+    endpoint->tx_token_next++;
+
+    if (endpoint->tx_token_next == BLE_PORT_TX_TOKEN_UNKNOWN)
+        endpoint->tx_token_next++;
+
+    return endpoint->tx_token_next;
+}
+
+static uint8_t advertising_is_running(void)
+{
+    return (uint8_t)((s_port.activity.advertising == BLE_ADV_STARTING) || (s_port.activity.advertising == BLE_ADV_ACTIVE));
+}
+
+static void port_event_emit(ble_endpoint_ctx_t *endpoint, ble_port_event_t event, const void *parameter)
+{
+    if (s_port.event_callback != 0)
+        s_port.event_callback(s_port.event_user_data, (endpoint != 0) ? &endpoint->device : 0, event, parameter);
+}
+
+static void boundary_reset(ble_endpoint_ctx_t *endpoint)
+{
+    endpoint->boundary_head = 0u;
+    endpoint->boundary_tail = 0u;
+}
+
+static uint8_t boundary_is_full(const ble_endpoint_ctx_t *endpoint)
+{
+    return (uint8_t)((uint8_t)(endpoint->boundary_head + 1u) % BLE_PORT_BOUNDARY_CAPACITY == endpoint->boundary_tail);
+}
+
+static uint8_t boundary_push(ble_endpoint_ctx_t *endpoint, uint16_t length)
+{
+    uint8_t next;
+
+    if ((length == 0u) || (boundary_is_full(endpoint) != 0u))
+        return 0u;
+
+    next = (uint8_t)((endpoint->boundary_head + 1u) % BLE_PORT_BOUNDARY_CAPACITY);
+    endpoint->boundary[endpoint->boundary_head] = length;
+    endpoint->boundary_head = next;
+    return 1u;
+}
+
+static uint16_t boundary_front(const ble_endpoint_ctx_t *endpoint)
+{
+    return (endpoint->boundary_head != endpoint->boundary_tail) ? endpoint->boundary[endpoint->boundary_tail] : 0u;
+}
+
+static void boundary_consume(ble_endpoint_ctx_t *endpoint, uint16_t length)
+{
+    while ((length != 0u) && (endpoint->boundary_head != endpoint->boundary_tail))
+    {
+        uint16_t *front = &endpoint->boundary[endpoint->boundary_tail];
+
+        if (length < *front)
+        {
+            *front = (uint16_t)(*front - length);
+            return;
+        }
+
+        length = (uint16_t)(length - *front);
+        endpoint->boundary_tail = (uint8_t)((endpoint->boundary_tail + 1u) % BLE_PORT_BOUNDARY_CAPACITY);
+    }
+}
+
+//LE 序 -> MSB 序
+static void mac_le_to_msb(const bd_addr_t *le, uint8_t out[6])
+{
+    uint8_t i;
+
+    for (i = 0u; i < 6u; i++)
+        out[i] = le->addr[5u - i];
+}
+//MSB 序 -> LE 序
+static void mac_msb_to_le(const uint8_t msb[6], uint8_t out_le[6])
+{
+    uint8_t i;
+
+    for (i = 0u; i < 6u; i++)
+        out_le[i] = msb[5u - i];
+}
+
+static int port_scan_filter_store(const ble_scan_filter_t *filter)
+{
+    ble_port_scan_filter_t stored;
+    uint16_t length;
+
+    if ((filter == 0) || (filter->type > BLE_SCAN_FILTER_BY_NAME))
+        return CHAR_DEV_ERR_PARAM;
+
+    memset(&stored, 0, sizeof(stored));
+    stored.type = filter->type;
+
+    if (filter->type == BLE_SCAN_FILTER_DISABLE)
+    {
+        s_port.scan_filter = stored;
+        return CHAR_DEV_OK;
+    }
+
+    if (filter->data == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    if (filter->type == BLE_SCAN_FILTER_BY_ADDRESS)
+    {
+        mac_msb_to_le(filter->data, stored.value.address_le);
+        s_port.scan_filter = stored;
+        return CHAR_DEV_OK;
+    }
+
+    length = 0u;
+
+    while ((length < sizeof(stored.value.name)) && (filter->data[length] != 0u))
+        length++;
+
+    if ((length == 0u) || (length >= sizeof(stored.value.name)))
+        return CHAR_DEV_ERR_PARAM;
+
+    memcpy(stored.value.name, filter->data, length);
+    s_port.scan_filter = stored;
+    return CHAR_DEV_OK;
+}
+
+static void port_on_ble_msg(struct ble_msg_t const *p_msg)
+{
+    if (p_msg == 0)
+        return;
+
+    switch (p_msg->msg_id)
+    {
+        case APP_BLE_GAP_CONNECTED:
+        {
+            struct gapc_connection_req_ind const *ind = p_msg->msg.p_connection_ind;
+            ble_dev_conn_info_t info;
+            uint8_t conn_index, role, i;
+            ble_endpoint_id_t endpoint_id;
+            ble_endpoint_ctx_t *endpoint;
+
+            if (ind == 0)
+                break;
+
+            conn_index = APP_CON_IDX_MAX;
+
+            for (i = 0u; i < APP_CON_IDX_MAX; i++)
+            {
+                if (app_env.conn_env[i].conhdl == ind->conhdl)
+                {
+                    conn_index = i;
+                    break;
+                }
+            }
+
+            if (conn_index >= APP_CON_IDX_MAX)
+                break;
+
+            role = ind->role;
+            endpoint_id = (role != 0u) ? BLE_ENDPOINT_PHONE : BLE_ENDPOINT_BMS;
+            endpoint = endpoint_get(endpoint_id);
+
+            if (endpoint == 0)
+                break;
+
+            endpoint_generation_advance(endpoint);
+            endpoint->conn_index = conn_index;
+            endpoint->linked = 1u;
+            endpoint->tx_ready = (endpoint_id == BLE_ENDPOINT_PHONE) ? 0u : 1u;
+            endpoint->inflight_link_generation = 0u;
+            endpoint->tx_token_inflight = BLE_PORT_TX_TOKEN_UNKNOWN;
+            mac_le_to_msb(&ind->peer_addr, endpoint->peer_mac_msb);
+            Stream_Reset(&endpoint->stream);
+            endpoint_mtu_reset(endpoint);
+            boundary_reset(endpoint);
+            info.role        = role;
+            info.mac         = endpoint->peer_mac_msb;
+            info.conn_handle = ind->conhdl;
+
+            if (endpoint_id == BLE_ENDPOINT_PHONE)
+                s_port.activity.advertising = BLE_ADV_IDLE;
+            else
+                s_port.activity.scanning = BLE_SCAN_IDLE;
+
+            port_event_emit(endpoint, BLE_PORT_EVENT_LINK_UP, &info);
+            break;
+        }
+
+        case APP_BLE_GAP_DISCONNECTED:
+        {
+            struct gapc_disconnect_ind const *ind = p_msg->msg.p_disconnect_ind;
+            uint8_t conn_index = BLE_PORT_CONN_INDEX_INVALID, i;
+            ble_endpoint_id_t endpoint_id;
+            ble_endpoint_ctx_t *endpoint;
+
+            if (ind == 0)
+                break;
+
+            for (i = 0u; i < APP_CON_IDX_MAX; i++)
+            {
+                if ((app_env.conn_env[i].conhdl == ind->conhdl) &&
+                    (app_env.conn_env[i].conhdl != GAP_INVALID_CONHDL))
+                {
+                    conn_index = i;
+                    break;
+                }
+            }
+
+            endpoint_id = endpoint_id_from_conn_index(conn_index);
+            endpoint = endpoint_get(endpoint_id);
+
+            if (endpoint == 0)
+                break;
+
+            if (endpoint_id == BLE_ENDPOINT_PHONE)
+            {
+                app_rdtss_on_link_lost(endpoint->conn_index);
+                app_svc_on_link_lost(endpoint->conn_index);
+            }
+
+            endpoint_generation_advance(endpoint);
+            endpoint->linked = 0u;
+            endpoint->tx_ready = 0u;
+            endpoint->conn_index = BLE_PORT_CONN_INDEX_INVALID;
+            endpoint->inflight_link_generation = 0u;
+            endpoint->tx_token_inflight = BLE_PORT_TX_TOKEN_UNKNOWN;
+            memset(endpoint->peer_mac_msb, 0, sizeof(endpoint->peer_mac_msb));
+            Stream_Reset(&endpoint->stream);
+            endpoint_mtu_reset(endpoint);
+            boundary_reset(endpoint);
+            port_event_emit(endpoint, BLE_PORT_EVENT_LINK_DOWN, &ind->reason);
+            break;
+        }
+
+        case APP_BLE_GATTC_MTU_IND:
+        {
+            struct gattc_mtu_changed_ind const *ind = p_msg->msg.p_gattc_mtu;
+            ble_endpoint_ctx_t *endpoint = endpoint_get(
+                                               endpoint_id_from_conn_index(p_msg->conn_index));
+
+            if (ind == 0)
+                break;
+
+            if ((endpoint != 0) && (ind->mtu > 3u))
+            {
+                endpoint->att_mtu = ind->mtu;
+                (void)Stream_TxSubmitLimitSet(&endpoint->stream, (uint16_t)(ind->mtu - 3u));
+            }
+
+            break;
+        }
+
+        case APP_BLE_OS_READY:
+            ns_ble_radio_power_set(BLE_PORT_RADIO_TX_POWER);
+            NS_LOG_INFO("[BLE_PORT] RF TX power requested: +6 dBm\r\n");
+
+            if (s_port.ready_fired == 0u)
+            {
+                s_port.ready_fired = 1u;
+                memset(&s_port.activity, 0, sizeof(s_port.activity));
+                port_event_emit(0, BLE_PORT_EVENT_READY, 0);
+            }
+
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void port_on_scan_data(struct gapm_ext_adv_report_ind const *ind)
+{
+    ble_scan_report_t rep;
+
+    if (ind == 0)
+        return;
+
+    mac_le_to_msb(&ind->trans_addr.addr, s_port.scan_report_mac_msb);
+    rep.adv_data = ind->data;
+    rep.adv_len  = (ind->length > 0xFFu) ? 0xFFu : (uint8_t)ind->length;
+    rep.rssi     = ind->rssi;
+    rep.mac      = s_port.scan_report_mac_msb;
+    rep.addr_type = ind->trans_addr.addr_type;
+    port_event_emit(endpoint_get(BLE_ENDPOINT_BMS), BLE_PORT_EVENT_SCAN_REPORT, &rep);
+}
+
+void ble_port_data_rx(uint8_t sdk_conidx, const uint8_t *data, uint16_t len)
+{
+    ble_endpoint_ctx_t *endpoint;
+
+    if ((data == 0) || (len == 0u))
+        return;
+
+    endpoint = endpoint_get(endpoint_id_from_conn_index(sdk_conidx));
+
+    if ((endpoint == 0) || (Stream_RxSpace(&endpoint->stream) < len) || (boundary_is_full(endpoint) != 0u))
+        return;
+
+    if ((Stream_RxWrite(&endpoint->stream, data, len) == len) && (boundary_push(endpoint, len) != 0u))
+        (void)rx_indicate(&endpoint->device, len);
+}
+
+int ble_port_phone_cccd_set(uint8_t sdk_conidx, uint8_t enabled)
+{
+    ble_endpoint_ctx_t *phone = endpoint_get(BLE_ENDPOINT_PHONE);
+
+    if ((endpoint_is_connected(phone) == 0u) || (phone->conn_index != sdk_conidx))
+        return CHAR_DEV_ERR_STATE;
+
+    if (enabled != 0u)
+    {
+        phone->tx_ready = 1u;
+        Stream_TxPump(&phone->stream);
+        return CHAR_DEV_OK;
+    }
+
+    phone->tx_ready = 0u;
+    phone->inflight_link_generation = 0u;
+    phone->tx_token_inflight = BLE_PORT_TX_TOKEN_UNKNOWN;
+    Stream_TxReset(&phone->stream);
+    return CHAR_DEV_OK;
+}
+
+void ble_port_on_tx_cfm(ble_endpoint_id_t endpoint_id, uint8_t conn_index,
+                        uint16_t tx_token)
+{
+    ble_endpoint_ctx_t *endpoint = endpoint_get(endpoint_id);
+
+    if ((endpoint_is_connected(endpoint) != 0u) &&
+        (tx_token != BLE_PORT_TX_TOKEN_UNKNOWN) &&
+        (endpoint->inflight_link_generation ==
+         endpoint->connection_generation) &&
+        (tx_token == endpoint->tx_token_inflight) &&
+        ((conn_index == BLE_PORT_CONN_INDEX_INVALID) ||
+         (conn_index == endpoint->conn_index)) &&
+        (Stream_TxComplete(&endpoint->stream) == CHAR_DEV_OK))
+    {
+        endpoint->inflight_link_generation = 0u;
+        endpoint->tx_token_inflight = BLE_PORT_TX_TOKEN_UNKNOWN;
+        (void)tx_complete(&endpoint->device,
+                          endpoint->tx_stage);
+        Stream_TxPump(&endpoint->stream);
+    }
+}
+
+void ble_port_control_rx(const uint8_t *data, uint16_t len)
+{
+    ble_data_event_t event_data;
+
+    if ((data == 0) || (len == 0u))
+        return;
+
+    event_data.data = data;
+    event_data.len = len;
+    port_event_emit(endpoint_get(BLE_ENDPOINT_PHONE),
+                    BLE_PORT_EVENT_CONTROL_RX, &event_data);
+}
+
+void ble_port_bms_ready(uint8_t conn_index, uint8_t status)
+{
+    ble_endpoint_ctx_t *endpoint = endpoint_get(BLE_ENDPOINT_BMS);
+
+    if ((endpoint_is_connected(endpoint) == 0u) ||
+        (endpoint->conn_index != conn_index))
+        return;
+
+    port_event_emit(endpoint, BLE_PORT_EVENT_BMS_READY, &status);
+}
+
+static void port_send_adv_stop(void)
+{
+    struct gapm_activity_stop_cmd *p;
+
+    if (app_env.adv_actv_idx >= APP_CON_IDX_MAX)
+        return;
+
+    p = KE_MSG_ALLOC(GAPM_ACTIVITY_STOP_CMD, TASK_GAPM, TASK_APP, gapm_activity_stop_cmd);
+
+    if (p == 0)
+        return;
+
+    p->operation = GAPM_STOP_ACTIVITY;
+    p->actv_idx = app_env.adv_actv_idx;
+    app_env.adv_state = APP_ADV_STATE_STOPPING;
+    app_env.current_op = CURRENT_OP_STOP_ADV;
+    s_port.activity.advertising = BLE_ADV_STOPPING;
+    ke_msg_send(p);
+}
+
+static void port_adv_msg_handler(enum app_adv_mode mode)
+{
+    NS_LOG_INFO("[GAP_SM] adv fsm mode -> %u (2=DIR 3=FAST 4=SLOW 5=STOP)\r\n", (unsigned)mode);
+    s_port.activity.advertising =
+        (mode == APP_ADV_MODE_STOP) ? BLE_ADV_IDLE : BLE_ADV_ACTIVE;
+
+    if (s_port.pending_adv_stop != 0u)
+    {
+        s_port.pending_adv_stop = 0u;
+        if (s_port.strict_scan_enabled != 0u)
+            s_port.pending_adv_command = 2u;
+        else
+            port_send_adv_stop();
+    }
+}
+
+/* Called by the existing BLE process; no extra task or timer is introduced. */
+static void port_strict_activity_process(void)
+{
+    uint8_t mode;
+    if (s_port.strict_scan_enabled == 0u)
+        return;
+
+    ns_ble_scan_strict_process();
+    if (ns_ble_scan_transition_pending() || ns_ble_adv_operation_pending() ||
+        (s_port.activity.initiating != BLE_INIT_IDLE))
+        return;
+
+    if (s_port.pending_adv_command != 0u)
+    {
+        uint8_t command = s_port.pending_adv_command;
+        s_port.pending_adv_command = (command == 3u) ? 1u : 0u;
+        (void)rw_control(&s_port.endpoint[BLE_ENDPOINT_PHONE].device,
+                         (command == 1u) ? BLE_DEV_IOC_ADV_START : BLE_DEV_IOC_ADV_STOP, 0);
+        if (ns_ble_adv_operation_pending() || (s_port.pending_adv_command != 0u))
+            return;
+    }
+    if (s_port.pending_scan_start != 0u)
+    {
+        if ((s_port.activity.initiating != BLE_INIT_IDLE) ||
+            (s_connect_request.valid != 0u))
+            return;
+        mode = s_port.pending_scan_start;
+        s_port.pending_scan_start = 0u;
+        scan_env.scan_intv = (mode == 2u) ? 160u : s_port.config.scan_interval_10ms;
+        scan_env.scan_wd = (mode == 2u) ? 16u : s_port.config.scan_window_10ms;
+        scan_env.scan_enable = 1u;
+        scan_env.filter_type = SCAN_FILTER_DISABLE;
+        scan_env.filter_data = 0;
+        scan_env.connect_enable = 0u;
+        ns_ble_start_scan();
+    }
+    port_pending_connect_start();
+}
+
+static void port_pending_connect_start(void)
+{
+    if ((s_connect_request.valid == 0u) ||
+        (s_port.activity.scanning != BLE_SCAN_IDLE) ||
+        (s_port.activity.initiating != BLE_INIT_IDLE))
+        return;
+    if ((s_port.strict_scan_enabled != 0u) &&
+        (ns_ble_scan_transition_pending() || ns_ble_adv_operation_pending() ||
+         (s_port.pending_adv_command != 0u)))
+        return;
+
+    s_connect_request.valid = 0u;
+    s_port.activity.initiating = BLE_INIT_CONNECTING;
+    ns_ble_start_init(s_connect_request.addr_le, s_connect_request.addr_type);
+}
+
+static void port_scan_stop_request(void)
+{
+    scan_env.scan_enable = 0u;
+    if (s_port.strict_scan_enabled != 0u)
+    {
+        if (s_port.pending_scan_start != 0u)
+        {
+            s_port.pending_scan_start = 0u;
+            s_port.activity.scanning = BLE_SCAN_IDLE;
+            if (s_connect_request.valid != 0u)
+                port_pending_connect_start();
+            else
+                port_central_idle_emit();
+            return;
+        }
+        if (s_port.activity.scanning == BLE_SCAN_IDLE)
+        {
+            port_pending_connect_start();
+            return;
+        }
+        s_port.activity.scanning = BLE_SCAN_STOPPING;
+        ns_ble_stop_scan();
+        return;
+    }
+
+    if (s_port.activity.scanning == BLE_SCAN_IDLE)
+    {
+        port_pending_connect_start();
+        return;
+    }
+
+    if (s_port.activity.scanning == BLE_SCAN_STOPPING)
+        return;
+
+    ns_ble_stop_scan();
+    s_port.activity.scanning = BLE_SCAN_STOPPING;
+}
+
+static void port_central_idle_emit(void)
+{
+    port_event_emit(endpoint_get(BLE_ENDPOINT_BMS), BLE_PORT_EVENT_CENTRAL_IDLE, 0);
+}
+
+static void port_scan_state_handler(enum scan_state_t state)
+{
+    switch (state)
+    {
+        case SCAN_STATE_SCANING:
+            if ((s_port.activity.scanning == BLE_SCAN_STOPPING) ||
+                (s_connect_request.valid != 0u))
+            {
+                s_port.activity.scanning = BLE_SCAN_ACTIVE;
+                port_scan_stop_request();
+                break;
+            }
+
+            s_port.activity.scanning = BLE_SCAN_ACTIVE;
+            s_port.activity.initiating = BLE_INIT_IDLE;
+            break;
+
+        case SCAN_STATE_FOUND:
+        case SCAN_STATE_CONNECTING:
+            s_port.activity.scanning = BLE_SCAN_IDLE;
+
+            if (s_port.activity.initiating == BLE_INIT_CANCELING)
+                ns_ble_stop_init();
+            else
+                s_port.activity.initiating = BLE_INIT_CONNECTING;
+
+            break;
+
+        case SCAN_STATE_IDLE:
+            s_port.activity.scanning = BLE_SCAN_IDLE;
+
+            if (s_connect_request.valid != 0u)
+                port_pending_connect_start();
+            else
+                port_central_idle_emit();
+
+            break;
+
+        case SCAN_STATE_CONN_TIMEOUT:
+            s_port.activity.scanning = BLE_SCAN_IDLE;
+            s_port.activity.initiating = BLE_INIT_CANCELING;
+            s_connect_request.valid = 0u;
+            break;
+
+        case SCAN_STATE_INIT_IDLE:
+            s_port.activity.initiating = BLE_INIT_IDLE;
+
+            if (s_connect_request.valid != 0u)
+                port_pending_connect_start();
+            else
+                port_central_idle_emit();
+
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void ble_port_adv_diag(void)
+{
+    NS_LOG_INFO("[GAP_SM] adv diag: mode=%u state=%u op=%u actv=%u/%u/%u\r\n",
+                (unsigned)app_env.adv_mode, (unsigned)app_env.adv_state,
+                (unsigned)app_env.current_op, (unsigned)app_env.adv_actv_idx,
+                (unsigned)app_env.scan_actv_idx, (unsigned)app_env.init_actv_idx);
+}
+
+//抽象层初始化接口，无实质初始化作用
+static int rw_init(struct device *dev)
+{
+    if (endpoint_from_device(dev) == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    return CHAR_DEV_OK;
+}
+
+//抽象层打开设备
+static int rw_open(struct device *dev, uint16_t oflag)
+{
+    ble_endpoint_ctx_t *endpoint = endpoint_from_device(dev);
+    int result;
+    (void)oflag;
+
+    if (endpoint == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    Stream_Reset(&endpoint->stream);//清空缓冲区
+    boundary_reset(endpoint);
+
+    if (s_port.stack_up != 0u)
+        return CHAR_DEV_OK;
+
+    result = rw_stack_start();//启动内核
+
+    if (result == CHAR_DEV_OK)
+        s_port.stack_up = 1u;
+
+    return result;
+}
+
+//抽象层关闭设备
+static int rw_close(struct device *dev)
+{
+    ble_endpoint_ctx_t *endpoint = endpoint_from_device(dev);
+
+    if (endpoint == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    Stream_Reset(&endpoint->stream);//清空缓冲区
+    boundary_reset(endpoint);
+    return CHAR_DEV_OK;
+}
+
+//更新主从机连接的配置
+static void rw_env_refresh(struct device *dev)
+{
+    ble_port_config_t *cfg = &s_port.config;
+    (void)dev;
+    memset((void *)&gap_env, 0, sizeof(gap_env));
+    gap_env.att_cfg = cfg->att_cfg;
+    gap_env.dev_role = cfg->device_role;
+    gap_env.mac_addr_type = cfg->mac_addr_type;
+    mac_msb_to_le(cfg->mac_msb, gap_env.mac_addr.addr);
+    gap_env.dev_name_len = (uint8_t)strlen(cfg->device_name);
+    memcpy((void *)gap_env.dev_name, cfg->device_name, gap_env.dev_name_len);
+    gap_env.dev_conn_param.intv_min = cfg->connection_interval_min;
+    gap_env.dev_conn_param.intv_max = cfg->connection_interval_max;
+    gap_env.dev_conn_param.latency = cfg->connection_latency;
+    gap_env.dev_conn_param.time_out = cfg->supervision_timeout;
+    gap_env.conn_param_update_delay = cfg->connection_update_delay_ms;
+    memset((void *)&adv_env, 0, sizeof(adv_env));
+
+    if (cfg->advertising_length > 0u)
+    {
+        adv_env.adv_data_len = cfg->advertising_length;
+        memcpy((void *)adv_env.adv_data, cfg->advertising_data, cfg->advertising_length);
+    }
+
+    adv_env.attach_name = 1u;
+    adv_env.fast_adv.enable = 1u;
+    adv_env.fast_adv.adv_intv = cfg->advertising_interval_625us;
+    adv_env.slow_adv = adv_env.fast_adv;
+    adv_env.adv_phy = PHY_1MBPS_VALUE;
+    adv_env.ble_adv_msg_handler = port_adv_msg_handler;
+    memset((void *)&scan_env, 0, sizeof(scan_env));
+    scan_env.type = GAPM_SCAN_TYPE_GEN_DISC;
+    scan_env.scan_enable = 1u;
+    scan_env.connect_enable = 0u;              // 自动连接关闭
+    scan_env.prop_active_enable = cfg->active_scan;
+    scan_env.dup_filt_pol = 0u;
+    scan_env.scan_intv = cfg->scan_interval_10ms;
+    scan_env.scan_wd = cfg->scan_window_10ms;
+    scan_env.duration = 0u;
+    scan_env.filter_type = SCAN_FILTER_DISABLE;
+    scan_env.filter_data = 0;
+    scan_env.ble_scan_data_handler = port_on_scan_data;
+    scan_env.ble_scan_state_handler = port_scan_state_handler;
+}
+
+//更新广播配置
+static int port_configuration_store(const ble_device_settings_t *settings)
+{
+    uint16_t name_length = 0u;
+    uint16_t advertising_name_length;
+
+    if ((settings == 0) || (settings->name == 0) ||
+        (settings->mac_msb == 0) ||
+        (settings->advertising_interval_ms < 20u) ||
+        (settings->advertising_interval_ms > 10000u))
+        return CHAR_DEV_ERR_PARAM;
+
+    while ((name_length < APP_DEVICE_NAME_MAX_LEN) && (settings->name[name_length] != '\0'))
+        name_length++;
+
+    if ((name_length == 0u) || (name_length >= APP_DEVICE_NAME_MAX_LEN))
+        return CHAR_DEV_ERR_PARAM;
+
+    memset(&s_port.config, 0, sizeof(s_port.config));
+    memcpy(s_port.config.device_name, settings->name, name_length);
+    memcpy(s_port.config.mac_msb, settings->mac_msb, sizeof(s_port.config.mac_msb));
+    s_port.config.device_role = BLE_PORT_DEVICE_ROLE_ALL;
+    s_port.config.connection_interval_min = 12u;
+    s_port.config.connection_interval_max = 24u;
+    s_port.config.supervision_timeout = 400u;
+    s_port.config.advertising_interval_625us = (uint16_t)(((uint32_t)settings->advertising_interval_ms * 8u + 2u) / 5u);
+    s_port.config.active_scan = 1u;
+    s_port.config.scan_interval_10ms = 16u;
+    s_port.config.scan_window_10ms = 16u;
+    advertising_name_length = name_length;
+
+    if (advertising_name_length > (uint16_t)(ADV_DATA_LEN - 2u))
+        advertising_name_length = (uint16_t)(ADV_DATA_LEN - 2u);
+
+    s_port.config.advertising_data[0] = (uint8_t)(2u + 1u);
+    s_port.config.advertising_data[1] = 0x02u;
+    s_port.config.advertising_data[2] = 0x00;
+    s_port.config.advertising_data[3] = 0xFF;
+    s_port.config.advertising_data[4] = 0x07u;
+    s_port.config.advertising_data[5] = 0xFFu;
+    memcpy(&s_port.config.advertising_data[6], settings->mac_msb, 0x06u);
+    s_port.config.advertising_length = (uint8_t)(13u);
+    s_port.configured = 1u;
+    return CHAR_DEV_OK;
+}
+
+static int endpoint_mtu_exchange(ble_endpoint_ctx_t *endpoint, uint16_t requested_mtu)
+{
+    uint8_t previous_conn_index;
+
+    if (endpoint == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    if (endpoint_is_connected(endpoint) == 0u)
+        return CHAR_DEV_ERR_STATE;
+
+    if ((requested_mtu < 23u) || (requested_mtu > 517u))
+        return CHAR_DEV_ERR_PARAM;
+
+    if (endpoint->att_mtu >= requested_mtu)
+        return CHAR_DEV_OK;
+
+    previous_conn_index = ns_ble_get_active_connection();
+    ns_ble_set_active_connection(endpoint->conn_index);
+    ns_ble_mtu_set(requested_mtu);
+    ns_ble_set_active_connection(previous_conn_index);
+    return CHAR_DEV_OK;
+}
+
+// SMP安全模块回调：配对/加密结果只关心中央(BMS)链路
+static void port_sec_msg_handler(struct sec_msg_t const *sec_msg)
+{
+    ble_endpoint_ctx_t *endpoint;
+
+    if ((sec_msg == 0) || (sec_msg->conidx >= APP_CON_IDX_MAX))
+        return;
+
+    if (endpoint_id_from_conn_index(sec_msg->conidx) != BLE_ENDPOINT_BMS)
+        return; /* 手机(peripheral)侧的配对不影响BMS业务流程 */
+
+    endpoint = endpoint_get(BLE_ENDPOINT_BMS);
+
+    switch (sec_msg->msg_id)
+    {
+        case NS_SEC_PAIR_SUCCEED:  /* 首次配对绑定成功 */
+        case NS_SEC_ENC_SUCCEED:  /* 已绑定设备重连加密成功 */
+            port_event_emit(endpoint, BLE_PORT_EVENT_BMS_SECURED, 0);
+            break;
+
+        case NS_SEC_PAIR_FAILED:
+            /* 底层ns_sec在配对失败后会主动断开，这里仅通知应用记录日志 */
+            port_event_emit(endpoint, BLE_PORT_EVENT_BMS_PAIR_FAILED, 0);
+            break;
+
+        case NS_SEC_PINCODE_ENTER:
+            /* 本机无输入/显示：对端要求输入passkey时回复固定PIN（Just Works设备不会走到这里） */
+            ns_sec_pincode_respond(sec_msg->conidx, BLE_PORT_FIXED_PASSKEY);
+            break;
+
+        default:
+            break;
+    }
+}
+
+// 初始化SMP安全模块（参数取自app_user_config.h，与手机配对弹窗所要求的绑定一致）
+static void port_sec_init(void)
+{
+    struct ns_sec_init_t sec_init = {0};
+
+    sec_init.rand_pin_enable = false;
+    sec_init.pin_code = BLE_PORT_FIXED_PASSKEY;
+    sec_init.pairing_feat.auth      = (SEC_PARAM_BOND | (SEC_PARAM_MITM << 2) | (SEC_PARAM_LESC << 3) | (SEC_PARAM_KEYPRESS << 4));
+    sec_init.pairing_feat.iocap     = SEC_PARAM_IO_CAPABILITIES;
+    sec_init.pairing_feat.key_size  = SEC_PARAM_KEY_SIZE;
+    sec_init.pairing_feat.oob       = SEC_PARAM_OOB;
+    sec_init.pairing_feat.ikey_dist = SEC_PARAM_IKEY;
+    sec_init.pairing_feat.rkey_dist = SEC_PARAM_RKEY;
+    sec_init.pairing_feat.sec_req   = SEC_PARAM_SEC_MODE_LEVEL;
+    sec_init.bond_enable            = BOND_STORE_ENABLE;
+    sec_init.bond_db_addr           = BOND_DATA_BASE_ADDR;
+    sec_init.bond_max_peer          = MAX_BOND_PEER;
+    sec_init.bond_sync_delay        = 2000u;
+    sec_init.ns_sec_msg_handler     = port_sec_msg_handler;
+    ns_sec_init(&sec_init);
+}
+
+//蓝牙协议栈启动接口
+static int rw_stack_start(void)
+{
+    struct ns_stack_cfg_t stack_cfg;
+    extern struct ns_ble_add_prf_evn_t add_prf_evn;
+
+    if (s_port.configured == 0u)
+        return CHAR_DEV_ERR_PARAM;
+
+    memset((void *)&add_prf_evn, 0, sizeof(add_prf_evn));
+    memset((void *)&app_env, 0, sizeof(app_env));
+    stack_cfg.ble_msg_handler = port_on_ble_msg;
+    stack_cfg.user_msg_handler = 0;
+    stack_cfg.lsc_cfg = BLE_LSC_LSI_32000HZ;
+    ns_ble_stack_init(&stack_cfg);
+    port_sec_init();           /* 初始化SMP配对/绑定参数与回调，供中央连接BMS时发起配对 */
+    rw_env_refresh(0);
+    (void)ns_ble_add_prf_func_register(app_rdtss_add_rdts);
+    (void)ns_ble_add_prf_func_register(app_svc_add);
+    (void)ns_ble_add_prf_func_register(app_rdtsc_add_rdts);
+    ns_ble_reset();
+
+    if (SysPlatform_Initialize() != SYS_PLATFORM_OK)
+    {
+        NS_LOG_ERROR("[BLE_PORT] TASK_APP message handler registration failed\r\n");
+        return CHAR_DEV_ERR_STATE;
+    }
+
+    return CHAR_DEV_OK;
+}
+
+// 主机发送接口
+static int tx_phone(ble_endpoint_ctx_t *endpoint, const uint8_t *data, uint16_t len)
+{
+    if ((endpoint_tx_sendable(endpoint) == 0u) ||
+        (endpoint->inflight_link_generation !=
+         endpoint->connection_generation) ||
+        (endpoint->tx_token_inflight == BLE_PORT_TX_TOKEN_UNKNOWN) ||
+        (app_rdtss_notify_raw(endpoint->conn_index,
+                              endpoint->tx_token_inflight,
+                              data, len) == false))
+        return CHAR_DEV_ERR_BUSY;
+
+    return CHAR_DEV_OK;
+}
+// 从机发送接口
+static int tx_bms(ble_endpoint_ctx_t *endpoint, const uint8_t *data, uint16_t len)
+{
+    struct rdtsc_data_tx_req *request;
+
+    if (endpoint_is_connected(endpoint) == 0u)
+        return CHAR_DEV_ERR_STATE;
+
+    request = KE_MSG_ALLOC_DYN(RDTSC_DATA_TX_REQ, prf_get_task_from_id(TASK_ID_RDTSC), TASK_APP, rdtsc_data_tx_req, len);
+
+    if (request == 0)
+        return CHAR_DEV_ERR_BUSY;
+
+    request->seq_num = endpoint->tx_token_inflight;
+    request->cursor = endpoint->conn_index;
+    request->length = len;
+    memcpy((void *)request->data, data, len);
+    ke_msg_send(request);
+    return CHAR_DEV_OK;
+}
+
+//设备端点收发接口
+static int endpoint_submit(void *context, const uint8_t *data, uint16_t length)
+{
+    ble_endpoint_ctx_t *endpoint = (ble_endpoint_ctx_t *)context;
+    int result;
+
+    if ((endpoint == 0) || (endpoint->port != &s_port) || (data == 0) || (length == 0u))
+        return CHAR_DEV_ERR_STATE;
+
+    if (endpoint_is_connected(endpoint) == 0u)
+        return CHAR_DEV_ERR_STATE;
+
+    if ((endpoint->id == BLE_ENDPOINT_PHONE) && (endpoint->tx_ready == 0u))
+        return CHAR_DEV_ERR_BUSY;
+
+    endpoint->inflight_link_generation = endpoint->connection_generation;
+    endpoint->tx_token_inflight = endpoint_tx_token_allocate(endpoint);
+    result = (endpoint->id == BLE_ENDPOINT_PHONE) ? tx_phone(endpoint, data, length) : tx_bms(endpoint, data, length);
+
+    if (result != CHAR_DEV_OK)
+    {
+        endpoint->inflight_link_generation = 0u;
+        endpoint->tx_token_inflight = BLE_PORT_TX_TOKEN_UNKNOWN;
+    }
+
+    return result;
+}
+
+//抽象层读接口：缓冲区读
+static int rw_read(struct device *dev, uint32_t pos, void *buffer, uint32_t size)
+{
+    ble_endpoint_ctx_t *endpoint = endpoint_from_device(dev);
+    uint16_t requested;
+    uint16_t read;
+    (void)pos;
+
+    if ((endpoint == 0) || ((buffer == 0) && (size != 0u)))
+        return CHAR_DEV_ERR_PARAM;
+
+    requested = (size > 0xFFFFu) ? 0xFFFFu : (uint16_t)size;
+    read = Stream_Read(&endpoint->stream, (uint8_t *)buffer, requested);
+    boundary_consume(endpoint, read);
+    return (int)read;
+}
+
+//抽象层写接口：缓冲区写
+static int rw_write(struct device *dev, uint32_t pos, const void *buffer, uint32_t size)
+{
+    ble_endpoint_ctx_t *endpoint = endpoint_from_device(dev);
+    uint16_t requested;
+    (void)pos;
+
+    if ((endpoint == 0) || ((buffer == 0) && (size != 0u)))
+        return CHAR_DEV_ERR_PARAM;
+
+    if ((size == 0u) || (size > 0xFFFFu))
+        return CHAR_DEV_ERR_PARAM;
+
+    if (endpoint_is_connected(endpoint) == 0u)
+        return CHAR_DEV_ERR_STATE;
+
+    if ((endpoint->id == BLE_ENDPOINT_PHONE) && (endpoint->tx_ready == 0u))
+        return CHAR_DEV_ERR_BUSY;
+
+    requested = (uint16_t)size;
+
+    if (Stream_TxSpace(&endpoint->stream) < requested)
+        return CHAR_DEV_ERR_BUSY;
+
+    return (int)Stream_Write(&endpoint->stream, (const uint8_t *)buffer, requested);
+}
+
+
+//抽象层控制接口
+static int rw_control(struct device *dev, int cmd, void *arg)
+{
+    ble_endpoint_ctx_t *endpoint = endpoint_from_device(dev);
+
+    if (endpoint == 0)
+        return CHAR_DEV_ERR_PARAM;
+
+    switch (cmd)
+    {
+        case BLE_DEV_IOC_SCAN_START:
+            if ((endpoint_is_connected(endpoint_get(BLE_ENDPOINT_BMS)) != 0u) ||
+                (s_connect_request.valid != 0u) ||
+                (s_port.activity.initiating != BLE_INIT_IDLE))
+                return CHAR_DEV_ERR_BUSY;
+
+            if (s_port.activity.scanning != BLE_SCAN_IDLE)
+                return CHAR_DEV_OK;
+
+            if (s_port.strict_scan_enabled != 0u)
+            {
+                s_port.pending_scan_start = 1u;
+                s_port.activity.scanning = BLE_SCAN_STARTING;
+                port_strict_activity_process();
+                return CHAR_DEV_OK;
+            }
+            scan_env.scan_intv = s_port.config.scan_interval_10ms;
+            scan_env.scan_wd = s_port.config.scan_window_10ms;
+            scan_env.scan_enable = 1u;
+            scan_env.filter_type = SCAN_FILTER_DISABLE;
+            scan_env.filter_data = 0;
+            scan_env.connect_enable = 0u;
+            ns_ble_start_scan();
+            s_port.activity.scanning = BLE_SCAN_STARTING;
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_SCAN_MONITOR_START:
+            if ((endpoint->id != BLE_ENDPOINT_BMS) ||
+                (endpoint_is_connected(endpoint) == 0u))
+                return CHAR_DEV_ERR_STATE;
+            if ((s_connect_request.valid != 0u) ||
+                (s_port.activity.initiating != BLE_INIT_IDLE))
+                return CHAR_DEV_ERR_BUSY;
+            if (s_port.activity.scanning != BLE_SCAN_IDLE)
+                return CHAR_DEV_OK;
+            ns_ble_scan_strict_enable();
+            s_port.strict_scan_enabled = 1u;
+            s_port.pending_scan_start = 2u;
+            s_port.activity.scanning = BLE_SCAN_STARTING;
+            port_strict_activity_process();
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_SCAN_STOP:
+            scan_env.scan_enable = 0u;
+            s_connect_request.valid = 0u;
+
+            if (s_port.activity.scanning == BLE_SCAN_IDLE)
+                return CHAR_DEV_OK;
+
+            port_scan_stop_request();
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_ADV_START:
+            if ((s_port.strict_scan_enabled != 0u) &&
+                (ns_ble_scan_transition_pending() || ns_ble_adv_operation_pending() ||
+                 (s_port.activity.initiating != BLE_INIT_IDLE)))
+            {
+                if (s_port.pending_adv_command != 3u)
+                    s_port.pending_adv_command = (s_port.pending_adv_command == 2u) ? 3u : 1u;
+                return CHAR_DEV_OK;
+            }
+            ns_ble_adv_start();
+            s_port.activity.advertising = BLE_ADV_STARTING;
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_ADV_STOP:
+            if ((s_port.strict_scan_enabled != 0u) &&
+                (ns_ble_scan_transition_pending() || ns_ble_adv_operation_pending() ||
+                 (s_port.activity.initiating != BLE_INIT_IDLE)))
+            {
+                s_port.pending_adv_command = 2u;
+                return CHAR_DEV_OK;
+            }
+            if (app_env.adv_state == APP_ADV_STATE_STARTING)
+            {
+                s_port.pending_adv_stop = 1u;
+                s_port.activity.advertising = BLE_ADV_STOPPING;
+                return CHAR_DEV_OK;
+            }
+
+            ns_ble_adv_stop();
+            s_port.activity.advertising = BLE_ADV_STOPPING;
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_DISCONNECT:
+            if (endpoint_is_connected(endpoint) == 0u)
+                return CHAR_DEV_ERR_STATE;
+
+            ns_ble_set_active_connection(endpoint->conn_index);
+            ns_ble_disconnect();
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_CONFIGURE:
+        {
+            uint8_t restart = advertising_is_running();
+            int result = port_configuration_store((const ble_device_settings_t *)arg);
+
+            if (result != CHAR_DEV_OK)
+                return result;
+
+            if (s_port.stack_up == 0u)
+                return CHAR_DEV_OK;
+
+            if (restart != 0u)
+            {
+                result = rw_control(dev, BLE_DEV_IOC_ADV_STOP, 0);
+
+                if (result != CHAR_DEV_OK)
+                    return result;
+            }
+
+            rw_env_refresh(dev);
+
+            if (restart != 0u)
+                result = rw_control(dev, BLE_DEV_IOC_ADV_START, 0);
+
+            return result;
+        }
+
+        case BLE_DEV_IOC_CONNECT:
+            if (arg == 0)
+                return CHAR_DEV_ERR_PARAM;
+
+            if ((endpoint_is_connected(endpoint_get(BLE_ENDPOINT_BMS)) != 0u) ||
+                (s_connect_request.valid != 0u) ||
+                (s_port.activity.initiating != BLE_INIT_IDLE))
+                return CHAR_DEV_ERR_BUSY;
+
+            {
+                ble_dev_mac_t *m = (ble_dev_mac_t *)arg;
+
+                if (m->addr_type > 1u)
+                    return CHAR_DEV_ERR_PARAM;
+
+                mac_msb_to_le(m->mac, s_connect_request.addr_le);
+                s_connect_request.addr_type = m->addr_type;
+                s_connect_request.valid = 1u;
+
+                if (s_port.activity.scanning == BLE_SCAN_IDLE)
+                    port_pending_connect_start();
+                else
+                    port_scan_stop_request();
+            }
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_UPDATE_PARAM:
+            if (arg == 0)
+                return CHAR_DEV_ERR_PARAM;
+
+            {
+                const ble_conn_param_t *p = (const ble_conn_param_t *)arg;
+                struct gapc_conn_param cp;
+
+                if (endpoint_is_connected(endpoint) == 0u)
+                    return CHAR_DEV_ERR_STATE;
+
+                ns_ble_set_active_connection(endpoint->conn_index);
+                cp.intv_min = (uint16_t)MSECS_TO_UNIT(p->min_ms, 1250);   /* 1.25ms 单位 */
+                cp.intv_max = (uint16_t)MSECS_TO_UNIT(p->max_ms, 1250);
+                cp.latency  = p->latency;
+                cp.time_out = (uint16_t)MSECS_TO_UNIT(p->timeout_ms, 10000); /* 10ms 单位 */
+                return ns_ble_update_param(&cp) ? CHAR_DEV_OK : CHAR_DEV_ERR_STATE;
+            }
+
+        case BLE_DEV_IOC_SET_SCAN_FILTER:
+            return port_scan_filter_store((const ble_scan_filter_t *)arg);
+
+        case BLE_DEV_IOC_CONNECT_CANCEL:
+            s_connect_request.valid = 0u;
+            memset(s_connect_request.addr_le, 0, sizeof(s_connect_request.addr_le));
+
+            if (s_port.activity.initiating == BLE_INIT_IDLE)
+                return CHAR_DEV_OK;
+
+            if (s_port.activity.initiating == BLE_INIT_CANCELING)
+            {
+                ns_ble_retry_init_cleanup();
+                return CHAR_DEV_OK;
+            }
+
+            s_port.activity.initiating = BLE_INIT_CANCELING;
+
+            if ((app_env.init_actv_idx != 0xFF) &&
+                (app_env.current_op == CURRENT_OP_NULL))
+                ns_ble_retry_init_cleanup();
+            else
+                ns_ble_stop_init();
+
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_BMS_DATA_ENABLE:
+            if ((endpoint->id != BLE_ENDPOINT_BMS) || (endpoint_is_connected(endpoint) == 0u))
+                return CHAR_DEV_ERR_STATE;
+
+            app_rdtsc_enable_prf(endpoint->conn_index);
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_BMS_PAIR_START:
+            /* 中央角色主动发起SMP配对（绑定+加密），配对结果通过BMS_SECURED/BMS_PAIR_FAILED事件上报 */
+            if ((endpoint->id != BLE_ENDPOINT_BMS) || (endpoint_is_connected(endpoint) == 0u))
+                return CHAR_DEV_ERR_STATE;
+
+            ns_sec_send_bond_start(endpoint->conn_index);
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_CONTROL_REPLY:
+            if (arg == 0)
+                return CHAR_DEV_ERR_PARAM;
+
+            {
+                const ble_control_reply_t *reply = (const ble_control_reply_t *)arg;
+
+                if ((reply->length != 0u) && (reply->data == 0))
+                    return CHAR_DEV_ERR_PARAM;
+
+                ble_endpoint_ctx_t *phone = endpoint_get(BLE_ENDPOINT_PHONE);
+
+                if (endpoint_is_connected(phone) == 0u)
+                    return CHAR_DEV_ERR_STATE;
+
+                if (!app_svc_cmd_cmp_ind(phone->conn_index, reply->command,
+                                         reply->status, reply->data, reply->length))
+                    return CHAR_DEV_ERR_BUSY;
+            }
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_PROCESS:
+        {
+            ble_endpoint_ctx_t *phone = endpoint_get(BLE_ENDPOINT_PHONE);
+
+            port_strict_activity_process();
+            if (endpoint_tx_sendable(phone) != 0u)
+            {
+                app_rdtss_tx_poll();
+                Stream_TxPump(&phone->stream);
+            }
+
+            Stream_TxPump(&s_port.endpoint[BLE_ENDPOINT_BMS].stream);
+        }
+
+        return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_GET_STATUS:
+            if (arg == 0)
+                return CHAR_DEV_ERR_PARAM;
+
+            {
+                ble_port_status_t *status = (ble_port_status_t *)arg;
+                status->advertising =
+                    (uint8_t)(s_port.activity.advertising != BLE_ADV_IDLE);
+                status->scanning =
+                    (uint8_t)(s_port.activity.scanning != BLE_SCAN_IDLE);
+                status->scan_active =
+                    (uint8_t)(s_port.activity.scanning == BLE_SCAN_ACTIVE);
+                status->connecting =
+                    (uint8_t)((s_port.activity.initiating != BLE_INIT_IDLE) ||
+                              (s_connect_request.valid != 0u));
+                status->phone_linked = endpoint_is_connected(
+                                           endpoint_get(BLE_ENDPOINT_PHONE));
+                status->bms_linked = endpoint_is_connected(
+                                         endpoint_get(BLE_ENDPOINT_BMS));
+            }
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_RX_COUNT:
+            if (arg == 0)
+                return CHAR_DEV_ERR_PARAM;
+
+            *(uint16_t *)arg = Stream_RxCount(&endpoint->stream);
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_RX_NEXT_SIZE:
+            if (arg == 0)
+                return CHAR_DEV_ERR_PARAM;
+
+            *(uint16_t *)arg = boundary_front(endpoint);
+            return CHAR_DEV_OK;
+			
+        case BLE_DEV_IOC_RX_PEEK:
+            if (arg == 0)
+                return CHAR_DEV_ERR_PARAM;
+
+            {
+                ble_rx_peek_t *peek = (ble_rx_peek_t *)arg;
+                uint16_t length = boundary_front(endpoint);
+                peek->length = 0u;
+
+                if ((peek->data == 0) && (peek->capacity != 0u))
+                    return CHAR_DEV_ERR_PARAM;
+                if (length > peek->capacity)
+                    length = peek->capacity;
+                peek->length = Stream_RxPeek(&endpoint->stream, peek->data, length);
+            }
+            return CHAR_DEV_OK;
+			
+        case BLE_DEV_IOC_TX_SPACE:
+            if (arg == 0)
+                return CHAR_DEV_ERR_PARAM;
+
+            if ((endpoint->id == BLE_ENDPOINT_PHONE) && (endpoint_tx_sendable(endpoint) == 0u))
+                *(uint16_t *)arg = 0u;
+            else
+                *(uint16_t *)arg = Stream_TxSpace(&endpoint->stream);
+
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_ADV_DIAG:     
+            ble_port_adv_diag();
+            return CHAR_DEV_OK;
+
+        case BLE_DEV_IOC_EXCHANGE_MTU:
+        {
+            uint16_t requested_mtu;
+            requested_mtu = (uint16_t)(uintptr_t)arg;
+            return endpoint_mtu_exchange(endpoint, requested_mtu);
+        }
+
+        default:
+            return CHAR_DEV_ERR_PARAM;
+    }
+}
+
+static const ops_t s_ble_endpoint_ops =
+{
+    rw_init,
+    rw_open,
+    rw_close,
+    rw_read,
+    rw_write,
+    rw_control
+};
+
+//抽象层注册接口
+int ble_port_register(ble_port_event_cb_t callback, void *user_data)
+{
+    uint8_t index;
+    int result;
+    memset(&s_port, 0, sizeof(s_port));
+    s_port.event_callback = callback;
+    s_port.event_user_data = user_data;
+
+    for (index = 0u; index < BLE_ENDPOINT_COUNT; index++)
+    {
+        ble_endpoint_ctx_t *endpoint = &s_port.endpoint[index];
+        endpoint->port = &s_port;
+        endpoint->id = (ble_endpoint_id_t)index;
+        endpoint->conn_index = BLE_PORT_CONN_INDEX_INVALID;
+        result = Stream_Init(&endpoint->stream, endpoint->rx_storage, sizeof(endpoint->rx_storage), endpoint->tx_storage, sizeof(endpoint->tx_storage), endpoint->tx_stage, sizeof(endpoint->tx_stage), endpoint_submit, endpoint);
+
+        if (result != CHAR_DEV_OK)
+            return result;
+
+        endpoint_mtu_reset(endpoint);
+        result = Register(&endpoint->device, &s_ble_endpoint_ops, user_data);
+
+        if (result != CHAR_DEV_OK)
+            return result;
+    }
+
+    return CHAR_DEV_OK;
+}
+
+device_t *ble_port_phone_device(void)
+{
+    return &s_port.endpoint[BLE_ENDPOINT_PHONE].device;
+}
+
+device_t *ble_port_bms_device(void)
+{
+    return &s_port.endpoint[BLE_ENDPOINT_BMS].device;
+}
+
+uint8_t ble_port_conn_index_of(ble_endpoint_id_t endpoint)
+{
+    return endpoint_conn_index(endpoint);
+}

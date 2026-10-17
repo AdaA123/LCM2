@@ -1,0 +1,281 @@
+/**
+*     Copyright (c) 2025, NSING Technologies Inc.
+* 
+*     All rights reserved.
+*
+*     This software is the exclusive property of NSING Technologies Inc. (Hereinafter 
+* referred to as NSING). This software, and the product of NSING described herein 
+* (Hereinafter referred to as the Product) are owned by NSING under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     NSING does not grant any license under its patents, copyrights, trademarks, or other 
+* intellectual property rights. Names and brands of third party may be mentioned or referred 
+* thereto (if any) for identification purposes only.
+*
+*     NSING reserves the right to make changes, corrections, enhancements, modifications, and 
+* improvements to this software at any time without notice. Please contact NSING and obtain 
+* the latest version of this software before placing orders.
+
+*     Although NSING has attempted to provide accurate and reliable information, NSING assumes 
+* no responsibility for the accuracy and reliability of this software.
+* 
+*     It is the responsibility of the user of this software to properly design, program, and test 
+* the functionality and safety of any application made of this information and any resulting product. 
+* In no event shall NSING be liable for any direct, indirect, incidental, special,exemplary, or 
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     NSING Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property 
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify NSING and hold NSING 
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related 
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not 
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by NSING, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     NSING products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations. 
+* User shall comply with any applicable export control laws and regulations promulgated and administered by 
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+
+/**
+ * @file global_var.h
+ * @author NSING Firmware Team
+ * @version v1.0.0
+ *
+ * @copyright Copyright (c) 2025, NSING Technologies Inc. All rights reserved.
+ */
+ 
+#ifndef __GLOBAL_VER_H__
+#define __GLOBAL_VER_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Includes ------------------------------------------------------------------*/
+#include "stdint.h"
+#include "stdbool.h"
+
+/* Public typedef -----------------------------------------------------------*/
+typedef enum 
+{
+    TX_POWER_0_DBM = 0, /*  0 dBm */
+    TX_POWER_Neg2_DBM,  /* -2 dBm */  
+    TX_POWER_Neg4_DBM,  /* -4 dBm */
+    TX_POWER_Neg8_DBM,  /* -8 dBm */
+    TX_POWER_Neg15_DBM, /* -12 dBm */
+    TX_POWER_Neg20_DBM, /* -16 dBm */ 
+    TX_POWER_Pos2_DBM,  /* +2 dBm */
+    TX_POWER_Pos3_DBM,  /* +3 dBm */
+    TX_POWER_Pos4_DBM,  /* +4 dBm */
+    TX_POWER_Pos6_DBM,  /* +6 dBm */ 
+
+    TX_POWER_MAX_VAL = TX_POWER_Pos6_DBM,
+}rf_tx_power_t;
+
+static const uint8_t TXPWR_MAP[][3]=
+{
+0, 0x17, 0x13,  /*  0 dBm */
+0, 0x17, 0x10,  /* -2 dBm */ 
+0, 0x17, 0x0e,  /* -4 dBm */
+0, 0x17, 0x09,  /* -8 dBm */
+0, 0x17, 0x04,  /* -12 dBm */
+0, 0x17, 0x00,  /* -16 dBm */
+0, 0x17, 0x18,  /* +2 dBm */
+1, 0x17, 0x14,  /* +3 dBm */    
+1, 0x17, 0x15,  /* +4 dBm */
+1, 0x17, 0x19,  /* +6 dBm */
+};
+
+/* Public define ------------------------------------------------------------*/	
+/// Branch configuration for patch control
+typedef struct
+{
+    /// Patch for ke_timer_set function
+    bool patch_ke_timer_set  : 1;
+    /// Patch for 3 connection support
+    bool patch_3_conn : 1;
+    /// Patch for advertisement interval check
+    bool patch_adv_interval : 1;
+    /// Patch for duration calculation 1
+    bool patch_duration1 : 1;
+    /// Patch for duration calculation 2
+    bool patch_duration2 : 1;
+    /// Default pin timer flag (for llc_le_ping_set)
+    bool default_pin_timer : 1;
+    /// Default PHY update procedure flag
+    bool default_phy_upd_proc : 1;
+    /// Default data length update procedure flag
+    bool default_dl_upd_proc : 1;
+    /// Clear authenticated payload timers in llc_cleanup
+    bool llc_cleanup_timer_clear : 1;
+    /// Force gen private key for ECC operations
+    bool force_gen_private_key : 1;
+    /// Restrict remote supported features based on version number
+    bool restrict_rem_supp_feat : 1;
+
+    /// App init branch patch
+    bool app_init_branch : 1;
+    /// GAPM setup init branch patch
+    bool gapm_setup_init : 1;
+    /// GAPM init attribute database branch patch
+    bool gapm_init_attr : 1;
+    /// GATTM init attribute database branch patch
+    bool gattm_init_attr : 1;
+    /// GAPM set local address branch patch (true: use GAPM_PRIV_CFG_PRIV_EN_BIT check, false: use gapc_is_local_addr_rpa check)
+    bool gapm_set_local_addr : 1;
+    /// HCI transport on/off branch patch
+    bool hci_transport_onff : 1;
+    /// AHI init branch patch (true: call ahi_init, false: skip)
+    bool ahi_init_branch : 1;
+    /// NS corrself config branch patch
+    bool ns_corrself_cfg : 1;
+    /// Enable llhwc_phy_prerx in sleep isr (true: enable, false: disable)
+    bool enable_prerx_in_slp : 1;
+    /// LLD connection branch patch 0
+    bool lld_con_branch0 : 1;
+    /// LLD connection branch patch 1
+    bool lld_con_branch1 : 1;
+    /// LLD connection branch patch 2
+    bool lld_con_branch2 : 1;
+    /// LLD connection branch patch 3
+    bool lld_con_branch3 : 1;
+    /// LLD connection branch patch 4
+    bool lld_con_branch4 : 1;
+    /// LLD connection branch patch 5
+    bool lld_con_branch5 : 1;
+    /// LLD connection branch patch 6
+    bool lld_con_branch6 : 1;
+    /// LLD connection branch patch 7
+    bool lld_con_branch7 : 1;
+    /// LLD connection branch patch 8
+    bool lld_con_branch8 : 1;
+    /// LLD connection branch patch 9
+    bool lld_con_branch9 : 1;
+    /// LLD connection branch patch 10
+    bool lld_con_branch10 : 1;
+    /// Reserved bits for future patches
+    uint32_t reserved : 1;
+} branch_cfg_t;
+
+typedef struct
+{
+    void (*init)(uint8_t init_type);
+    void (*create)(uint8_t conidx);
+    void (*cleanup)(uint8_t conidx, uint8_t reason);
+    uint8_t (*add_profile)(void *params, uint16_t *prf_task);
+    uint16_t (*get_task_from_id)(uint16_t id);
+    uint16_t (*get_id_from_task)(uint16_t task);
+} prf_func_tbl_t;
+
+/** Flash operation return codes **/
+typedef enum {
+    FlashOperationSuccess,    /* Operation completed successfully            */
+    FlashWriteRegFailed,      /* Failed to write status/configuration register */
+    FlashTimeOut,             /* Operation timed out                         */
+    FlashIsBusy,              /* Flash is busy (WIP=1)                       */
+    FlashQuadNotEnable,       /* Quad mode not enabled                       */
+    FlashAddressInvalid,      /* Address out of range                        */
+} ReturnMsg;
+// NOR Flash information structure
+// Contains configuration details for different NOR Flash devices
+typedef struct {
+    uint32_t flash_id;      // Unique Flash device ID
+    const char *vendor;     // Vendor name
+    const char *model;      // Device model name
+    uint8_t qspi_mode;      // QSPI mode (MODE_4LINE_4CYCLE/MODE_4LINE_2CYCLE/MODE_2LINE)
+    uint16_t flash_size;    // Flash size in KB
+    uint8_t otp_count;      // Number of OTP blocks
+    uint16_t otp_size;      // Size of each OTP block in bytes
+    uint16_t otp_1st_addr;  // Address of 1st OTP block (OTPINV if not present)
+    uint16_t otp_2nd_addr;  // Address of 2nd OTP block (OTPINV if not present)
+    uint16_t otp_3rd_addr;  // Address of 3rd OTP block (OTPINV if not present)
+    uint16_t otp_4th_addr;  // Address of 4th OTP block (OTPINV if not present)
+    uint8_t status_reg_type;// Status register type (STATUS_REG_ONE/STATUS_REG_TWO)
+} nor_flash_info;
+
+/* Public variables ---------------------------------------------------------*/
+extern uint32_t g_system_clk;
+extern uint8_t g_sleep_status_flag;
+extern uint32_t g_timeoutcnt;   
+
+extern branch_cfg_t g_branch; 
+extern prf_func_tbl_t prf_func;
+
+//32k----global var 
+extern uint32_t g_lsi_accuracy;
+extern uint32_t g_lsi_count_n_syscle;  
+extern uint32_t g_lsi_1_syscle_cal_value;  
+extern uint32_t g_lsi_1_syscle_cnt_value;
+extern uint16_t g_rc32k_trim;
+
+//32M----global var 
+extern uint8_t g_delay_div_param;
+extern uint8_t g_delay_us_div_param;
+
+extern uint16_t g_company_id;
+extern uint8_t g_version_sw_major;
+extern uint8_t g_version_sw_minor;
+extern uint8_t g_version_sw_build;
+
+extern uint16_t g_adv_intv; 
+extern uint8_t rwip_prog_delay;
+
+//#define BT_DEFAULT_BDADDR  {{0x11, 0x22, 0x33, 0x33, 0x22, 0x33}}
+extern struct bd_addr g_co_default_bdaddr;
+    
+extern uint8_t  BLE_NORMAL_WIN_SIZE;
+extern uint8_t  BLE_RX_DESC_NB;
+extern uint8_t  RWIP_MINIMUM_SLEEP_TIME;        
+extern struct le_features llm_local_le_feats;
+     
+#define RWIP_HEAP_ENV       (g_rwip_heap_env)
+#define RWIP_HEAP_DB        (RWIP_HEAP_ENV     +   g_rwip_heap_env_size)
+#define RWIP_HEAP_MSG       (RWIP_HEAP_DB      +   g_rwip_heap_db_size)
+#define RWIP_HEAP_NONRET    (RWIP_HEAP_MSG     +   g_rwip_heap_msg_size)
+
+extern uint32_t g_rwip_heap_env;    
+extern uint16_t g_rwip_heap_env_size;
+extern uint16_t g_rwip_heap_db_size;
+extern uint32_t g_rwip_heap_msg_size;
+extern uint32_t g_rwip_heap_non_ret_size;       
+
+extern struct prf_task_cbs* g_cbs;
+extern void (*rf_init_ptr)(void *api);
+extern void (*llhwc_phy_prerx_ptr)(void);
+extern void (*llhwc_phy_initialization_ptr)(void);
+extern void (*chn_table_init_ptr)(void);
+extern void pretxrx_chip(void);
+extern void (*HardFault_Handler_ptr)(void);
+extern void (*NMI_IRQHandler_ptr)(void);
+extern void rom_calib_clk_init(void);
+extern uint32_t g_apb1_clk;
+
+//Flash api in ROM
+extern const nor_flash_info *g_flash_info;
+extern ReturnMsg ATOMIC_SE( uint32_t flash_address );
+extern ReturnMsg ATOMIC_QPP(uint32_t flash_address, uint8_t *source_address, uint32_t byte_length);
+extern ReturnMsg ATOMIC_QREAD(uint32_t flash_address, uint8_t *target_address, uint32_t byte_length);
+extern ReturnMsg ATOMIC_OTP_ERASE( uint32_t flash_address );
+extern ReturnMsg ATOMIC_OTP_WRITE(uint32_t flash_address, uint8_t *source_address, uint32_t byte_length);
+extern ReturnMsg ATOMIC_OTP_READ(uint32_t flash_address, uint8_t *target_address, uint32_t byte_length);
+extern ReturnMsg ATOMIC_OTP_LOCK(uint8_t otp_num);
+extern ReturnMsg ROM_SE( uint32_t flash_address );
+extern ReturnMsg ROM_QPP(uint32_t addr, uint8_t* p_data, uint32_t len);
+extern ReturnMsg ROM_QREAD(uint32_t flash_address, uint8_t *target_address, uint32_t byte_length);
+
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __GLOBAL_VER_H__ */

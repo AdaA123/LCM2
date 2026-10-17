@@ -1,0 +1,561 @@
+/**
+*     Copyright (c) 2026, Nsing Technologies Inc.
+*
+*     All rights reserved.
+*
+*     This software is the exclusive property of Nsing Technologies Inc. (Hereinafter
+* referred to as Nsing). This software, and the product of Nsing described herein
+* (Hereinafter referred to as the Product) are owned by Nsing under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     Nsing does not grant any license under its patents, copyrights, trademarks, or other
+* intellectual property rights. Names and brands of third party may be mentioned or referred
+* thereto (if any) for identification purposes only.
+*
+*     Nsing reserves the right to make changes, corrections, enhancements, modifications, and
+* improvements to this software at any time without notice. Please contact Nsing and obtain
+* the latest version of this software before placing orders.
+
+*     Although Nsing has attempted to provide accurate and reliable information, Nsing assumes
+* no responsibility for the accuracy and reliability of this software.
+*
+*     It is the responsibility of the user of this software to properly design, program, and test
+* the functionality and safety of any application made of this information and any resulting product.
+* In no event shall Nsing be liable for any direct, indirect, incidental, special,exemplary, or
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     Nsing Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify Nsing and hold Nsing
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by Nsing, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     Nsing products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations.
+* User shall comply with any applicable export control laws and regulations promulgated and administered by
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+/**
+*\*\file n32wb033_lpuart.c
+*\*\author Nsing
+*\*\version v1.0.0
+*\*\copyright Copyright (c) 2026, Nsing Technologies Inc. All rights reserved.
+**/
+
+#include "n32wb033_lpuart.h"
+#include "n32wb033_rcc.h"
+
+/**
+*\*\name    LPUART_DeInit
+*\*\fun     Deinitializes the LPUARTx peripheral registers to their default reset values.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\return  none
+*\*\note    N32WB033 LPUART reset is in RCC_LSCTRL register (UM_N32WB033_RCC Section 22,
+*\*\          LPUART1RST=bit28, LPUART2RST=bit31). Unlike N32G43x which uses RET domain.
+**/
+void LPUART_DeInit(const LPUART_Module* LPUARTx)
+{
+    uint32_t rst_bit;
+    if (LPUARTx == LPUART1)
+    {
+        rst_bit = RCC_LSCTRL_LPUART1RST; /* RCC_LSCTRL bit28, verified */
+    }
+    else /* LPUART2 */
+    {
+        rst_bit = RCC_LSCTRL_LPUART2RST; /* RCC_LSCTRL bit31, verified */
+    }
+
+    /* Toggle reset via RCC API (RCC_EnableLowPwrSPeriphReset toggles set-then-clear) */
+    RCC_EnableLowPwrSPeriphReset(rst_bit);
+}
+
+/**
+*\*\name    LPUART_Init
+*\*\fun     Initializes the LPUARTx peripheral according to LPUART_InitParam.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   LPUART_InitParam (The input parameters must be the following values):
+*\*\          - BaudRate
+*\*\            - (((BaudRate) > 0) && ((BaudRate) < 0x010000))
+*\*\          - Parity
+*\*\            - LPUART_PE_NO
+*\*\            - LPUART_PE_EVEN
+*\*\            - LPUART_PE_ODD
+*\*\          - Mode
+*\*\            - LPUART_MODE_RX
+*\*\            - LPUART_MODE_TX
+*\*\          - RtsThreshold
+*\*\            - LPUART_RTSTH_FIFOHF
+*\*\            - LPUART_RTSTH_FIFO3QF
+*\*\            - LPUART_RTSTH_FIFOFU
+*\*\          - HardwareFlowControl
+*\*\            - LPUART_HFCTRL_NONE
+*\*\            - LPUART_HFCTRL_RTS
+*\*\            - LPUART_HFCTRL_CTS
+*\*\            - LPUART_HFCTRL_RTS_CTS
+*\*\return  none
+**/
+void LPUART_Init(LPUART_Module* LPUARTx, const LPUART_InitType* LPUART_InitParam)
+{
+    uint32_t tmpregister = 0x00U, clocksrc = 0x00U, apbclock = 0x00U;
+    uint32_t integerdivider    = 0x00U;
+    uint32_t fractionaldivider = 0x00U;
+    uint32_t tmpdivider = 0x00U, lastdivider = 0x00U, i = 0x00U;
+    uint32_t lpuartxbase       = 0U;
+    RCC_ClocksType RCC_ClocksStatus;
+
+    lpuartxbase = (uint32_t)(uintptr_t)LPUARTx;
+
+    /*---------------------------- LPUART CTRL Configuration -----------------------*/
+    tmpregister = LPUARTx->CTRL;
+    tmpregister &= LPUART_CTRL_CLR_MASK;
+    tmpregister |= (uint32_t)LPUART_InitParam->Parity | LPUART_InitParam->Mode \
+                | LPUART_InitParam->RtsThreshold | LPUART_InitParam->HardwareFlowControl;
+    LPUARTx->CTRL = tmpregister;
+
+    /*---------------------------- LPUART BRCFG1 & BRCFG2 Configuration -----------------------*/
+    if (lpuartxbase == LPUART1_BASE)
+    {
+        clocksrc = RCC_GetLpuartClkSrc(RCC_LPUART1CLK);
+    }
+    else /* LPUART2 */
+    {
+        clocksrc = RCC_GetLpuartClkSrc(RCC_LPUART2CLK);
+    }
+
+    if (clocksrc == 1U) /* LSI_LSE_CLK */
+    {
+        if ((RCC->LSCTRL & RCC_LSCTRL_LSXSEL) == RCC_LSCTRL_LSXSEL)
+        {
+            apbclock = LSE_VALUE;
+        }
+        else
+        {
+            apbclock = LSI_VALUE;
+        }
+    }
+    else /* APB1 */
+    {
+        RCC_GetClocksFreqValue(&RCC_ClocksStatus);
+        apbclock = RCC_ClocksStatus.Pclk1Freq;
+    }
+
+    /* Determine the integer part */
+    integerdivider = apbclock / (LPUART_InitParam->BaudRate);
+
+    /* Configure sampling method */
+    if (integerdivider <= 10U)
+    {
+        LPUART_ConfigSamplingMethod(LPUARTx, LPUART_SMPCNT_1B);
+    }
+    else
+    {
+        LPUART_ConfigSamplingMethod(LPUARTx, LPUART_SMPCNT_3B);
+    }
+
+    /* Write to LPUART BRCFG1 */
+    LPUARTx->BRCFG1 = integerdivider;
+
+    /* Determine the fractional part */
+    fractionaldivider = ((apbclock % (LPUART_InitParam->BaudRate)) * 10000U) / (LPUART_InitParam->BaudRate);
+
+    tmpregister = 0x00U;
+    tmpdivider = fractionaldivider;
+    /* Implement the fractional part in the register */
+    for (i = 0U; i < 8U; i++)
+    {
+        lastdivider = tmpdivider;
+        tmpdivider = lastdivider + fractionaldivider;
+        if ((tmpdivider / 10000U) != (lastdivider / 10000U))
+        {
+            tmpregister |= (uint32_t)(0x01U << i);
+        }
+    }
+    /* Write to LPUART BRCFG2 */
+    LPUARTx->BRCFG2 = tmpregister;
+}
+
+/**
+*\*\name    LPUART_StructInit
+*\*\fun     Fills each LPUART_InitParam member with its default value.
+*\*\param   LPUART_InitParam (The input parameters must be the following values):
+*\*\          - BaudRate
+*\*\          - Parity
+*\*\          - Mode
+*\*\          - RtsThreshold
+*\*\          - HardwareFlowControl
+*\*\return  none
+**/
+void LPUART_StructInit(LPUART_InitType* LPUART_InitParam)
+{
+    /* LPUART_InitParam members default value */
+    LPUART_InitParam->BaudRate            = 9600U;
+    LPUART_InitParam->Parity              = LPUART_PE_NO;
+    LPUART_InitParam->Mode                = LPUART_MODE_RX | LPUART_MODE_TX;
+    LPUART_InitParam->RtsThreshold        = LPUART_RTSTH_FIFOFU;
+    LPUART_InitParam->HardwareFlowControl = LPUART_HFCTRL_NONE;
+}
+
+/**
+*\*\name    LPUART_FlushRxFifo
+*\*\fun     Flushes Receiver FIFO.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\return  none
+**/
+void LPUART_FlushRxFifo(LPUART_Module* LPUARTx)
+{
+    /* Set FLUSH bit to clear the LPUART Receiver FIFO */
+    LPUARTx->CTRL |= CTRL_FLUSH_SET;
+    while (LPUART_GetFlagStatus(LPUARTx, LPUART_FLAG_FIFO_NE) != RESET)
+    {
+        /* FIFO clear this bit must be set, belongs to the hardware behavior,
+        if it can not be set belongs to the hardware problem, need to be investigated. */
+    }
+    LPUARTx->CTRL &= CTRL_FLUSH_RESET;
+}
+
+/**
+*\*\name    LPUART_ConfigInt
+*\*\fun     Enables or disables the specified LPUART interrupts.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   LPUART_INT (The input parameters must be the following values):
+*\*\          - LPUART_INT_PEF      Parity Check Error Interrupt
+*\*\          - LPUART_INT_TXC      TX Complete Interrupt
+*\*\          - LPUART_INT_FIFO_OV  FIFO Overflow Interrupt
+*\*\          - LPUART_INT_FIFO_FU  FIFO Full Interrupt
+*\*\          - LPUART_INT_FIFO_HF  FIFO Half Full Interrupt
+*\*\          - LPUART_INT_FIFO_NE  FIFO Non-Empty Interrupt
+*\*\          - LPUART_INT_WUF      Wake-Up Interrupt
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void LPUART_ConfigInt(LPUART_Module* LPUARTx, uint32_t LPUART_INT, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable the LPUART interrupt by setting the corresponding INTEN bit */
+        LPUARTx->INTEN |= (uint32_t)(LPUART_INT & LPUART_INT_MASK);
+    }
+    else
+    {
+        /* Disable the LPUART interrupt by clearing the corresponding INTEN bit */
+        LPUARTx->INTEN &= (uint32_t)(~(LPUART_INT & LPUART_INT_MASK));
+    }
+}
+
+/**
+*\*\name    LPUART_EnableDMA
+*\*\fun     Enables or disables the LPUART's DMA interface.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   LPUART_DMAReq (The input parameters must be the following values):
+*\*\          - LPUART_DMAREQ_TX       LPUART DMA transmit request
+*\*\          - LPUART_DMAREQ_RX       LPUART DMA receive request
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void LPUART_EnableDMA(LPUART_Module* LPUARTx, uint32_t LPUART_DMAReq, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable the DMA transfer by setting the DMA_TXEN and/or DMA_RXEN bits in the LPUART CTRL register */
+        LPUARTx->CTRL |= LPUART_DMAReq;
+    }
+    else
+    {
+        /* Disable the DMA transfer by clearing the DMA_TXEN and/or DMA_RXEN bits in the LPUART CTRL register */
+        LPUARTx->CTRL &= (uint32_t)(~LPUART_DMAReq);
+    }
+}
+
+/**
+*\*\name    LPUART_ConfigWakeUpMethod
+*\*\fun     Selects the LPUART WakeUp method.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   LPUART_WakeUpMethod (The input parameters must be the following values):
+*\*\          - LPUART_WUSTP_STARTBIT WakeUp by Start Bit Detection
+*\*\          - LPUART_WUSTP_RXNE     WakeUp by RXNE Detection
+*\*\          - LPUART_WUSTP_BYTE     WakeUp by A Configurable Received Byte
+*\*\          - LPUART_WUSTP_FRAME    WakeUp by A Programmed 4-Byte Frame
+*\*\return  none
+**/
+void LPUART_ConfigWakeUpMethod(LPUART_Module* LPUARTx, uint32_t LPUART_WakeUpMethod)
+{
+    /* Clear WUSEL[1:0] bits and configure the LPUART WakeUp method */
+    LPUARTx->CTRL &= LPUART_WUSEL_CLR_MASK;
+    LPUARTx->CTRL |= LPUART_WakeUpMethod;
+}
+
+/**
+*\*\name    LPUART_EnableWakeUpSleep
+*\*\fun     Enables or disables LPUART Wakeup in Sleep mode.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void LPUART_EnableWakeUpSleep(LPUART_Module* LPUARTx, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable Wakeup in Sleep mode by setting the WUSTP bit in the CTRL register */
+        LPUARTx->CTRL |= CTRL_WUSTP_SET;
+    }
+    else
+    {
+        /* Disable Wakeup in Sleep mode by clearing the WUSTP bit in the CTRL register */
+        LPUARTx->CTRL &= CTRL_WUSTP_RESET;
+    }
+}
+
+/**
+*\*\name    LPUART_ConfigSamplingMethod
+*\*\fun     Selects the LPUART Sampling method.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   LPUART_SamplingMethod (The input parameters must be the following values):
+*\*\          - LPUART_SMPCNT_3B 3 Sample bit
+*\*\          - LPUART_SMPCNT_1B 1 Sample bit
+*\*\return  none
+**/
+void LPUART_ConfigSamplingMethod(LPUART_Module* LPUARTx, uint32_t LPUART_SamplingMethod)
+{
+    /* Clear SMPCNT bit and configure the LPUART Sampling method */
+    LPUARTx->CTRL &= LPUART_SMPCNT_CLR_MASK;
+    LPUARTx->CTRL |= LPUART_SamplingMethod;
+}
+
+/**
+*\*\name    LPUART_EnableLoopBack
+*\*\fun     Enables or disables LPUART Loop Back Self-Test.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void LPUART_EnableLoopBack(LPUART_Module* LPUARTx, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable LPUART Loop Back Self-Test by setting the LOOKBACK bit in the CTRL register */
+        LPUARTx->CTRL |= CTRL_LOOPBACK_SET;
+    }
+    else
+    {
+        /* Disable LPUART Loop Back Self-Test by clearing the LOOKBACK bit in the CTRL register */
+        LPUARTx->CTRL &= CTRL_LOOPBACK_RESET;
+    }
+}
+
+/**
+*\*\name    LPUART_SendData
+*\*\fun     Transmits single data through the LPUART peripheral.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   Data (The input parameters must be the following values):
+*\*\          - 0x00 ~ 0xFF
+*\*\return  none
+**/
+void LPUART_SendData(LPUART_Module* LPUARTx, uint8_t Data)
+{
+    /* Transmit Data */
+    LPUARTx->DAT = (uint32_t)(Data & (uint8_t)0xFFU);
+}
+
+/**
+*\*\name    LPUART_ReceiveData
+*\*\fun     Returns the most recent received data by the LPUART peripheral.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\return  The received data (0x00 ~ 0xFF).
+**/
+uint8_t LPUART_ReceiveData(const LPUART_Module* LPUARTx)
+{
+    /* Receive Data */
+    return (uint8_t)(LPUARTx->DAT & (uint32_t)0xFFU);
+}
+
+/**
+*\*\name    LPUART_ConfigWakeUpData
+*\*\fun     Configures LPUART detected byte or frame match for wakeup CPU from Sleep mode.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   LPUART_WakeUpData (The input parameters must be the following values):
+*\*\          - specifies the LPUART detected byte or frame match for wakeup CPU from Sleep mode
+*\*\return  none
+**/
+void LPUART_ConfigWakeUpData(LPUART_Module* LPUARTx, uint32_t LPUART_WakeUpData)
+{
+    LPUARTx->WUDAT = LPUART_WakeUpData;
+}
+
+/**
+*\*\name    LPUART_GetFlagStatus
+*\*\fun     Checks whether the specified LPUART flag is set or not.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   LPUART_FLAG (The input parameters must be the following values):
+*\*\          - LPUART_FLAG_PEF       Parity Check Error Flag
+*\*\          - LPUART_FLAG_TXC       TX Complete Flag
+*\*\          - LPUART_FLAG_FIFO_OV   FIFO Overflow Flag
+*\*\          - LPUART_FLAG_FIFO_FU   FIFO Full Flag
+*\*\          - LPUART_FLAG_FIFO_HF   FIFO Half Full Flag
+*\*\          - LPUART_FLAG_FIFO_NE   FIFO Non-Empty Flag
+*\*\          - LPUART_FLAG_CTS       CTS Change(Hardware Flow Control) Flag
+*\*\          - LPUART_FLAG_WUF       Wakeup from Sleep mode Flag
+*\*\          - LPUART_FLAG_NF        Noise Detection Flag
+*\*\return  The new state of LPUART_FLAG (SET or RESET).
+**/
+FlagStatus LPUART_GetFlagStatus(const LPUART_Module* LPUARTx, uint32_t LPUART_FLAG)
+{
+    FlagStatus bitstatus = RESET;
+
+    if ((LPUARTx->STS & LPUART_FLAG) != (uint32_t)RESET)
+    {
+        bitstatus = SET;
+    }
+    else
+    {
+        bitstatus = RESET;
+    }
+    return bitstatus;
+}
+
+/**
+*\*\name    LPUART_ClrFlag
+*\*\fun     Clears the LPUART's pending flags.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   LPUART_FLAG (The input parameters must be the following values):
+*\*\          - LPUART_FLAG_PEF       Parity Check Error Flag
+*\*\          - LPUART_FLAG_TXC       TX Complete Flag
+*\*\          - LPUART_FLAG_FIFO_OV   FIFO Overflow Flag
+*\*\          - LPUART_FLAG_FIFO_FU   FIFO Full Flag
+*\*\          - LPUART_FLAG_FIFO_HF   FIFO Half Full Flag
+*\*\          - LPUART_FLAG_FIFO_NE   FIFO Non-Empty Flag
+*\*\          - LPUART_FLAG_CTS       CTS Change(Hardware Flow Control) Flag
+*\*\          - LPUART_FLAG_WUF       Wakeup from Sleep mode Flag
+*\*\          - LPUART_FLAG_NF        Noise Detection Flag
+*\*\return  none
+**/
+void LPUART_ClrFlag(LPUART_Module* LPUARTx, uint32_t LPUART_FLAG)
+{
+    /* Clear the LPUART flag by writing 1 to the corresponding STS bit */
+    LPUARTx->STS = LPUART_FLAG;
+}
+
+/**
+*\*\name    LPUART_GetIntStatus
+*\*\fun     Checks whether the specified LPUART interrupt has occurred or not.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   LPUART_INT (The input parameters must be the following values):
+*\*\          - LPUART_INT_PEF      Parity Check Error Interrupt
+*\*\          - LPUART_INT_TXC      TX Complete Interrupt
+*\*\          - LPUART_INT_FIFO_OV  FIFO Overflow Interrupt
+*\*\          - LPUART_INT_FIFO_FU  FIFO Full Interrupt
+*\*\          - LPUART_INT_FIFO_HF  FIFO Half Full Interrupt
+*\*\          - LPUART_INT_FIFO_NE  FIFO Non-Empty Interrupt
+*\*\          - LPUART_INT_WUF      Wake-Up Interrupt
+*\*\return  The new state of LPUART_INT (SET or RESET).
+**/
+INTStatus LPUART_GetIntStatus(const LPUART_Module* LPUARTx, uint32_t LPUART_INT)
+{
+    uint32_t bitpos = 0x00U, itmask = 0x00U;
+    INTStatus bitstatus = RESET;
+
+    /* Get the interrupt enable bit position from the high byte */
+    itmask = (uint32_t)(LPUART_INT >> 0x08U) & LPUART_INT_MASK;
+    itmask = (uint32_t)0x01U << itmask;
+    itmask &= LPUARTx->INTEN;
+
+    /* Get the interrupt status flag from the low byte */
+    bitpos = (LPUART_INT) & LPUART_INT_MASK;
+    /* WUF flag is at STS bit7 while WUFIE is at INTEN bit6, shift left by 1 */
+    if (LPUART_INT_WUF == LPUART_INT)
+    {
+        bitpos = (bitpos << 0x01U);
+    }
+    bitpos &= LPUARTx->STS;
+
+    if ((itmask != (uint32_t)RESET) && (bitpos != (uint32_t)RESET))
+    {
+        bitstatus = SET;
+    }
+    else
+    {
+        bitstatus = RESET;
+    }
+
+    return bitstatus;
+}
+
+/**
+*\*\name    LPUART_ClrIntPendingBit
+*\*\fun     Clears the LPUART's interrupt pending bits.
+*\*\param   LPUARTx (The input parameters must be the following values):
+*\*\          - LPUART1
+*\*\          - LPUART2
+*\*\param   LPUART_INT (The input parameters must be the following values):
+*\*\          - LPUART_INT_PEF      Parity Check Error Interrupt
+*\*\          - LPUART_INT_TXC      TX Complete Interrupt
+*\*\          - LPUART_INT_FIFO_OV  FIFO Overflow Interrupt
+*\*\          - LPUART_INT_FIFO_FU  FIFO Full Interrupt
+*\*\          - LPUART_INT_FIFO_HF  FIFO Half Full Interrupt
+*\*\          - LPUART_INT_FIFO_NE  FIFO Non-Empty Interrupt
+*\*\          - LPUART_INT_WUF      Wake-Up Interrupt
+*\*\return  none
+**/
+void LPUART_ClrIntPendingBit(LPUART_Module* LPUARTx, uint32_t LPUART_INT)
+{
+    uint32_t itmask = 0x00U;
+
+    /* Get the STS clear mask from the low byte */
+    itmask = (LPUART_INT) & LPUART_INT_MASK;
+
+    /* WUF flag is at STS bit7 while the encoded value uses INTEN bit6, shift left by 1 */
+    if (LPUART_INT_WUF == LPUART_INT)
+    {
+        itmask = (itmask << 0x01U);
+    }
+
+    /* Clear the LPUART interrupt pending bit by writing 1 to the corresponding STS bit */
+    LPUARTx->STS = itmask;
+}

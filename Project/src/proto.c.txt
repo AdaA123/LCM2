@@ -1,0 +1,1049 @@
+#include "proto.h"
+#include "update.h"
+#include "yl1650.h"
+#include "ns_log.h"
+#include <string.h>
+#include <stddef.h>
+#include <time.h>
+
+#define PROTO_UART_COUNT             2
+#define PROTO_STUDY_PREFIX_SIZE      8u
+#define PROTO_X11_RESERVED_TAIL_SIZE 9u
+#define PROTO_X11_APP_QUERY_SIZE    10
+#define PROTO_X16_APP_QUERY_SIZE     4u
+#define PROTO_IDENTITY_RESERVED_SIZE 8u
+#define PROTO_IDENTITY_TIME_SIZE     8u
+#define PROTO_IDENTITY_MAC_OFFSET    (PROTO_IDENTITY_RESERVED_SIZE + PROTO_TARGET_NAME_SIZE + PROTO_IDENTITY_TIME_SIZE)
+#define PROTO_IDENTITY_PAYLOAD_SIZE  (PROTO_IDENTITY_MAC_OFFSET + PROTO_TARGET_MAC_TEXT_SIZE)
+#define PROTO_IDENTITY_FRAME_SIZE    (PROTO_IDENTITY_PAYLOAD_SIZE + 6u)
+
+typedef struct
+{
+    Byte  data[PROTO_FRAME_MAX];
+    UInt16 length;
+} proto_uart_rx_t;
+
+static com_0x11_type         s_battery_status;
+static StudyType     s_study_data;
+static proto_study_ext_t s_study_extension;
+static Byte           s_study_prefix[PROTO_STUDY_PREFIX_SIZE];
+static Byte           s_battery_status_ready;
+static Byte           s_study_data_ready;
+static Byte           s_study_extension_ready;
+static com_0x11_type       s_fake_battery_status;
+static StudyType     s_fake_study_data;
+static proto_study_ext_t s_fake_study_extension;
+static Byte           s_fake_study_prefix[PROTO_STUDY_PREFIX_SIZE];
+static proto_uart_rx_t   s_uart_rx[PROTO_UART_COUNT];
+static proto_uart_rx_t   s_bms_ble_rx;
+static Byte s_phone_identity_rx[PROTO_IDENTITY_FRAME_SIZE];
+static UInt16 s_phone_identity_length;
+static device_t          *s_proto_device[PROTO_PORT_NUM];
+
+static const proto_app_ops_t *s_app_ops;
+static Byte s_target_request_port;
+static Byte s_target_request_type;
+
+// 复位成主机通讯
+void Proto_TargetRequestReset(void)
+{
+    s_target_request_port = PROTO_PORT_BLE_SLAVE;
+    s_target_request_type = 0u;
+}
+
+static Byte proto_app_bms_ready(void)
+{
+    if ((s_app_ops == 0) || (s_app_ops->bms_ready == 0))
+        return 0u;
+
+    return s_app_ops->bms_ready();
+}
+
+static void proto_handle_rx(Byte port, const Byte *frame, UInt16 length);
+
+// 计算 CRC16/MODBUS。
+UInt16 Proto_Crc16(const Byte *data, UInt16 length)
+{
+    UInt16 crc = 0xFFFF;
+    UInt16 index;
+    UInt16 bit;
+
+    if ((data == 0) && (length != 0))
+        return 0;
+
+    for (index = 0; index < length; index++)
+    {
+        crc ^= data[index];
+
+        for (bit = 0; bit < 8u; bit++)
+        {
+            crc = ((crc & 1) != 0) ?
+                  (UInt16)((crc >> 1) ^ 0xA001) :
+                  (UInt16)(crc >> 1);
+        }
+    }
+
+    return crc;
+}
+
+// 组装一帧 55AA 协议数据。
+UInt16 Proto_Pack(Byte type, Byte command, const Byte *data, UInt16 data_length, Byte *output, UInt16 output_size)
+{
+    UInt16 crc;
+    UInt16 total_length;
+
+    if ((output == 0) || ((data == 0) && (data_length != 0)) || (data_length > (UInt16)(0xFFFF - 6u)))
+        return 0;
+
+    total_length = (UInt16)(data_length + 6u);
+
+    if (output_size < total_length)
+        return 0;
+
+    output[0] = PROTO_HEAD1;
+    output[1] = PROTO_HEAD2;
+    output[2] = type;
+    output[3] = command;
+
+    if (data_length != 0)
+        memcpy(&output[4], data, data_length);
+
+    crc = Proto_Crc16(output, (UInt16)(data_length + 4u));
+    output[data_length + 4u] = (Byte)(crc & 0xFF);
+    output[data_length + 5] = (Byte)(crc >> 8);
+    return total_length;
+}
+
+Int16 Proto_BindPort(Byte port, device_t *device)
+{
+    if (port >= PROTO_PORT_NUM)
+        return -1;
+
+    s_proto_device[port] = device;
+    return 0;
+}
+
+// 组包并从指定协议端口发送。
+Int16 Proto_Send(Byte port, Byte type, Byte command, const Byte *data, UInt16 data_length)
+{
+    Byte frame[PROTO_FRAME_MAX];
+    UInt16 frame_length;
+    device_t *device;
+    Int16 written;
+
+    if (port >= PROTO_PORT_NUM)
+        return -1;
+
+    device = s_proto_device[port];
+
+    if (device == 0)
+        return -1;
+
+    frame_length = Proto_Pack(type, command, data, data_length,
+                              frame, sizeof(frame));
+
+    if (frame_length == 0)
+        return -1;
+
+    written = write(device, 0, frame, frame_length);
+    return (written == (int)frame_length) ? 0 : -2;
+}
+
+static Int16 proto_update_send(Byte port, Byte type, const Byte *data, UInt16 length)
+{
+    return Proto_Send(port, type, PROTO_CMD_UPDATE, data, length);
+}
+
+static Byte proto_frame_is_valid(const Byte *frame, UInt16 length)
+{
+    UInt16 crc;
+
+    if ((frame == 0) || (length < 6u) || (frame[0] != PROTO_HEAD1) || (frame[1] != PROTO_HEAD2))
+        return 0;
+
+    crc = Proto_Crc16(frame, (UInt16)(length - 2));
+    return (Byte)((frame[length - 2] == (Byte)(crc & 0xFF)) && (frame[length - 1] == (Byte)(crc >> 8)));
+}
+
+// 判断是否为0x11电池状态查询请求。
+static Byte proto_is_x11_query(const Byte *data,
+                                  UInt16 data_length)
+{
+    if (data_length == 0)
+        return 1;
+
+    return (Byte)((data != 0) && (data_length == PROTO_X11_APP_QUERY_SIZE) && (data[0] == 0x00) && (data[1] == 0x00));
+}
+
+// 判断是否为0x16学习数据查询请求。
+static Byte proto_is_x16_query(const Byte *data, UInt16 data_length)
+{
+    UInt16 index;
+
+    if ((data == 0) || ((data_length != 1) && (data_length != PROTO_X16_APP_QUERY_SIZE)))
+        return 0;
+
+    for (index = 0; index < data_length; index++)
+    {
+        if (data[index] != 0x00)
+            return 0;
+    }
+
+    return 1;
+}
+
+#include <time.h>
+
+// 从 "Jan 13 2017" 中提取月份缩写对应的数值
+static Int16 parse_month(const char *date_str)
+{
+    // date_str[0..2] 是三个字母的月份缩写
+    switch (date_str[0])
+    {
+        case 'J':
+            return (date_str[1] == 'a') ? 1 : (date_str[2] == 'n') ? 6 : 7;
+
+        case 'F':
+            return 2;
+
+        case 'M':
+            return (date_str[2] == 'r') ? 3 : 5;
+
+        case 'A':
+            return (date_str[2] == 'r') ? 4 : 8;
+
+        case 'S':
+            return 9;
+
+        case 'O':
+            return 10;
+
+        case 'N':
+            return 11;
+
+        case 'D':
+            return 12;
+
+        default:
+            return 1;
+    }
+}
+
+static time_t get_build_timestamp_manual(void)
+{
+    Int16 year  = (SoftwareInformation.build_date[7] - '0') * 1000 + (SoftwareInformation.build_date[8] - '0') * 100
+                + (SoftwareInformation.build_date[9] - '0') * 10   + (SoftwareInformation.build_date[10] - '0');
+    Int16 month = parse_month(SoftwareInformation.build_date);
+    // 日份：若 SoftwareInformation.build_date[4] 是空格，则个位数日份直接取 [5]
+    Int16 day   = (SoftwareInformation.build_date[4] == ' ') ? (SoftwareInformation.build_date[5] - '0')
+                : (SoftwareInformation.build_date[4] - '0') * 10 + (SoftwareInformation.build_date[5] - '0');
+    Int16 hour   = (SoftwareInformation.build_time[0] - '0') * 10 + (SoftwareInformation.build_time[1] - '0');
+    Int16 minute = (SoftwareInformation.build_time[3] - '0') * 10 + (SoftwareInformation.build_time[4] - '0');
+    Int16 second = (SoftwareInformation.build_time[6] - '0') * 10 + (SoftwareInformation.build_time[7] - '0');
+    struct tm tm_build = {0};
+    tm_build.tm_year = year - 1900;   // tm_year 是自 1900 年起的年数
+    tm_build.tm_mon  = month - 1;     // tm_mon 范围 0-11
+    tm_build.tm_mday = day;
+    tm_build.tm_hour = hour;
+    tm_build.tm_min  = minute;
+    tm_build.tm_sec  = second;
+    tm_build.tm_isdst = -1;
+    return mktime(&tm_build);
+}
+
+static void proto_fake_data_init(void)
+{
+    Byte index;
+    memset(&s_fake_battery_status, 0, sizeof(s_fake_battery_status));
+    memset(&s_fake_study_data, 0, sizeof(s_fake_study_data));
+    memset(&s_fake_study_extension, 0, sizeof(s_fake_study_extension));
+    memset(s_fake_study_prefix, 0, sizeof(s_fake_study_prefix));
+
+    for (index = 0; index < 24u; index++)
+        s_fake_battery_status.vbat.Cell[index] = 3300;
+
+    s_fake_battery_status.vbat.BatteryCode.HostModel  = YB_N32W_BLE_002_HOST;
+    s_fake_battery_status.vbat.BatteryCode.SlaveModel = YB_N32W_BLE_002_SLAVE;
+    s_fake_battery_status.vbat.HighestVoltageBat = 1;
+    s_fake_battery_status.vbat.LowVoltageBat = 1;
+    s_fake_battery_status.vbat.Soc = 50;
+    s_fake_battery_status.vbat.Soh = 100;
+    s_fake_battery_status.vbat.Voltage = 79200;
+    s_fake_battery_status.vbat.Current = 0;
+    s_fake_battery_status.vbat.TemperatureLow = 25;
+    s_fake_battery_status.vbat.TemperatureHight = 25;
+    s_fake_battery_status.vbat.Rmstemperature = 25;
+    s_fake_battery_status.vbat.Soe = 50;
+    s_fake_battery_status.vbat.Capacity = 50000;
+    s_fake_battery_status.vbat.Version = get_build_timestamp_manual();
+    s_fake_battery_status.StudySoc = 50;
+    s_fake_battery_status.BaseCapacity = 50.0f;
+    s_fake_battery_status.RemainingCapacity = 25.0f;
+    s_fake_battery_status.CurrentChargingMode = (ChargingMode_t)CHARGING_MODE_NORMAL;
+    s_fake_study_data.CurrentCorrectValue_C = 1.0f;
+    s_fake_study_data.CurrentCorrectValue_D = 1.0f;
+    s_fake_study_data.BaseCapacity = 50.0f;
+    s_fake_study_data.RemainingCapacity = 25.0f;
+    s_fake_study_data.UseBaseCapacity = 50.0f;
+    s_fake_study_data.RemainingCapacity1 = 25.0f;
+    s_fake_study_data.Soc = 50;
+    s_fake_study_extension.pack_voltage_mv = 79200;
+    s_fake_study_extension.pack_current_ma = 0;
+    s_fake_study_extension.highest_cell_mv = 3300;
+    s_fake_study_extension.lowest_cell_mv = 3300;
+    s_fake_study_extension.cell_delta_mv = 0;
+    s_fake_study_extension.soc_percent = 50;
+    s_fake_study_extension.soh_percent = 100;
+    s_fake_study_extension.soe_percent = 50;
+    s_fake_study_extension.rms_temperature_c = 25;
+    s_fake_study_extension.max_cell_voltage_mv = 3300;
+    s_fake_study_extension.fill_cell_max_mv = 3300;
+    s_fake_study_extension.fill_cell_min_mv = 3300;
+    s_fake_study_extension.fill_cell_average_mv = 3300;
+    s_fake_study_extension.fill_cell_used_mv = 3300;
+}
+
+static void proto_handle_x11(const Byte *data, UInt16 data_length)
+{
+    if ((data == 0) || (data_length < sizeof(s_battery_status)))
+        return;
+
+    memcpy(&s_battery_status, data, sizeof(s_battery_status));
+    s_battery_status_ready = 1;
+}
+
+static void proto_handle_x16(const Byte *data, UInt16 data_length)
+{
+    UInt16 base_length = (UInt16)(8u + sizeof(s_study_data));
+
+    if ((data == 0) || (data_length < base_length) || (data[0] != 0))
+        return;
+
+    memcpy(s_study_prefix, data, sizeof(s_study_prefix));
+    memcpy(&s_study_data, &data[8], sizeof(s_study_data));
+    s_study_extension_ready = 0;
+
+    if (data_length >= (UInt16)(base_length + sizeof(s_study_extension)))
+    {
+        memcpy(&s_study_extension, &data[base_length], sizeof(s_study_extension));
+        s_study_extension_ready = 1;
+    }
+
+    s_study_data_ready = 1;
+}
+
+static void proto_handle_phone_x11_request(Byte port, Byte type, const Byte *data, UInt16 data_length)
+{
+    Byte payload[sizeof(com_0x11_type) + PROTO_X11_RESERVED_TAIL_SIZE];
+    const com_0x11_type *reply;
+    Int16 send_result;
+
+    if (proto_is_x11_query(data, data_length) == 0)
+    {
+        NS_LOG_WARNING("[PROTO] phone X11 ignored: payload=%u\r\n", (unsigned)data_length);
+        return;
+    }
+
+    reply = (port == PROTO_PORT_BLE_MASTER) ? &s_battery_status : &s_fake_battery_status;
+    memcpy(payload, reply, sizeof(com_0x11_type));
+    if ((reply == &s_fake_battery_status) && (s_app_ops != 0) &&
+        (s_app_ops->local_project_no_get != 0))
+    {
+        UInt16 project_no = s_app_ops->local_project_no_get();
+        memcpy(&payload[offsetof(com_0x11_type, vbat) + offsetof(_vbat, BatteryCode)],
+               &project_no, sizeof(project_no));
+    }
+    memset(&payload[sizeof(com_0x11_type)], 0, PROTO_X11_RESERVED_TAIL_SIZE);
+    send_result = Proto_Send(port, type, PROTO_CMD_X11,
+                             payload, sizeof(com_0x11_type) + PROTO_X11_RESERVED_TAIL_SIZE);
+
+    if (send_result == 0)
+        NS_LOG_DEBUG("[PROTO] phone X11 reply: %s len=%u\r\n", (reply == &s_battery_status) ? "real" : "fake", (unsigned)(sizeof(payload) + 6u));    else
+        NS_LOG_ERROR("[PROTO] phone X11 reply failed: result=%d\r\n", send_result);
+}
+
+static void proto_handle_phone_x16_request(Byte port, Byte type, const Byte *data, UInt16 data_length)
+{
+    Byte payload[PROTO_STUDY_PREFIX_SIZE + sizeof(StudyType) + sizeof(proto_study_ext_t)];
+    UInt16 payload_length;
+
+    if (proto_is_x16_query(data, data_length) == 0)
+    {
+        NS_LOG_WARNING("[PROTO] phone X16 ignored: payload=%u\r\n", (unsigned)data_length);
+        return;
+    }
+
+    payload_length = (UInt16)(PROTO_STUDY_PREFIX_SIZE + sizeof(StudyType));
+
+    if ((proto_app_bms_ready() != 0) && (s_study_data_ready != 0))
+    {
+        memcpy(payload, s_study_prefix, PROTO_STUDY_PREFIX_SIZE);
+        memcpy(&payload[PROTO_STUDY_PREFIX_SIZE], &s_study_data, sizeof(s_study_data));
+
+        if (s_study_extension_ready != 0)
+        {
+            memcpy(&payload[payload_length], &s_study_extension, sizeof(s_study_extension));
+            payload_length = (UInt16)(payload_length + sizeof(s_study_extension));
+        }
+    }
+    else
+    {
+        memcpy(payload, s_fake_study_prefix, PROTO_STUDY_PREFIX_SIZE);
+        memcpy(&payload[PROTO_STUDY_PREFIX_SIZE], &s_fake_study_data, sizeof(s_fake_study_data));
+        memcpy(&payload[payload_length], &s_fake_study_extension, sizeof(s_fake_study_extension));
+        payload_length = (UInt16)(payload_length + sizeof(s_fake_study_extension));
+    }
+
+    {
+        Int16 send_result = Proto_Send(port, type, PROTO_CMD_X16, payload, payload_length);
+
+        if (send_result == 0)
+            NS_LOG_INFO("[PROTO] phone X16 reply: %s len=%u\r\n", ((proto_app_bms_ready() != 0) && (s_study_data_ready != 0)) ? "real" : "fake", (unsigned)(payload_length + 6u));
+        else
+            NS_LOG_ERROR("[PROTO] phone X16 reply failed: result=%d\r\n", send_result);
+    }
+}
+
+static void proto_handle_local_name(Byte port, Byte type, const Byte *data, UInt16 data_length)
+{
+    Byte result;
+    result = (Byte)((s_app_ops != 0) && (s_app_ops->local_name_set != 0) && (s_app_ops->local_name_set(data, data_length) == CHAR_DEV_OK));
+    (void)Proto_Send(port, type, PROTO_CMD_SET_LOCAL_NAME, &result, 1);
+}
+
+static void proto_handle_local_mac(Byte port, Byte type, const Byte *data, UInt16 data_length)
+{
+    Byte result = 0;
+
+    if ((data != 0) && (data_length == 6u) && (s_app_ops != 0) && (s_app_ops->local_mac_set != 0) && (s_app_ops->local_mac_set(data) == CHAR_DEV_OK))
+        result = 1u;
+
+    (void)Proto_Send(port, type, PROTO_CMD_SET_LOCAL_MAC, &result, 1);
+}
+
+static void proto_handle_target_unbind(Byte port, Byte type, const Byte *data, UInt16 data_length)
+{
+    static const Byte success_reply[] = {0x03u, 0x01u, 0x00u, 0x00u};
+    static const Byte failure_reply[] = {0x03u, 0x01u, 0x00u, 0x01u};
+    const Byte *reply;
+    UInt16 reply_length;
+    reply = failure_reply;
+    reply_length = (UInt16)sizeof(failure_reply);
+
+    if ((data != 0) && (data_length == 3u) && (data[0] == PROTO_TARGET_UNBIND) && (data[1] == 0x00u) && (data[2] == 0x00u) && (s_app_ops != 0) && (s_app_ops->target_clear != 0) && (s_app_ops->target_clear() == CHAR_DEV_OK))
+    {
+        Proto_TargetRequestReset();
+        reply = success_reply;
+    }
+
+    (void)Proto_Send(port, type, PROTO_CMD_SET_TARGET, reply, reply_length);
+}
+
+static Int16 proto_hex_value(Byte value)
+{
+    if ((value >= '0') && (value <= '9'))
+        return (int)(value - '0');
+
+    if ((value >= 'A') && (value <= 'F'))
+        return (int)(value - 'A' + 10);
+
+    if ((value >= 'a') && (value <= 'f'))
+        return (int)(value - 'a' + 10);
+
+    return -1;
+}
+
+static Byte proto_target_mac_parse(const Byte *text, UInt16 length, Byte address_msb[6])
+{
+    Byte index;
+
+    if ((text == 0) || (address_msb == 0) || (length != PROTO_TARGET_MAC_TEXT_SIZE))
+        return 0;
+
+    for (index = 0; index < 6u; index++)
+    {
+        Byte offset = (Byte)(index * 3);
+        Int16 high = proto_hex_value(text[offset]);
+        Int16 low = proto_hex_value(text[offset + 1]);
+
+        if ((high < 0) || (low < 0))
+            return 0;
+
+        if ((index < 5) && (text[offset + 2] != ':') && (text[offset + 2] != '-'))
+            return 0;
+
+        address_msb[index] = (Byte)(((Byte)high << 4) | (Byte)low);
+    }
+
+    return 1;
+}
+
+static void proto_handle_local_identity(Byte port, Byte type,
+                                        const Byte *data, UInt16 data_length)
+{
+    Byte reply[4] = {0xFFu, 0x00u, 0x00u, 0x00u};
+    const Byte *name;
+    const Byte *mac_text;
+    Byte mac_msb[6];
+    UInt16 index;
+    UInt16 name_length = PROTO_TARGET_NAME_SIZE;
+
+    if (type != 0u)
+        return;
+    if ((data == 0) || (data_length != PROTO_IDENTITY_PAYLOAD_SIZE) ||
+        (s_app_ops == 0) || (s_app_ops->local_identity_set == 0))
+        goto reply_failure;
+
+    for (index = 0u; index < PROTO_IDENTITY_RESERVED_SIZE; ++index)
+    {
+        if (data[index] != 0u)
+            goto reply_failure;
+    }
+
+    name = &data[PROTO_IDENTITY_RESERVED_SIZE];
+    for (index = 0u; index < PROTO_TARGET_NAME_SIZE; ++index)
+    {
+        if ((name[index] < 0x20u) || (name[index] > 0x7Eu))
+            goto reply_failure;
+    }
+    while ((name_length != 0u) && (name[name_length - 1u] == ' '))
+        --name_length;
+    if (name_length == 0u)
+        goto reply_failure;
+
+    /* The timestamp is reserved by this protocol and is deliberately ignored. */
+    mac_text = &data[PROTO_IDENTITY_MAC_OFFSET];
+    for (index = 2u; index < PROTO_TARGET_MAC_TEXT_SIZE; index += 3u)
+    {
+        if (mac_text[index] != ':')
+            goto reply_failure;
+    }
+    if (proto_target_mac_parse(mac_text, PROTO_TARGET_MAC_TEXT_SIZE, mac_msb) == 0u)
+        goto reply_failure;
+
+    reply[0] = 0x00u;
+    if (Proto_Send(port, type, PROTO_CMD_SET_LOCAL_IDENTITY,
+                   reply, sizeof(reply)) != CHAR_DEV_OK)
+        return;
+    reply[0] = (s_app_ops->local_identity_set(name, name_length, mac_msb) == CHAR_DEV_OK) ?
+               0x04u : 0xFFu;
+
+reply_failure:
+    (void)Proto_Send(port, type, PROTO_CMD_SET_LOCAL_IDENTITY,
+                     reply, sizeof(reply));
+}
+
+static void proto_handle_display_mode(Byte type, const Byte *data,
+                                     UInt16 data_length)
+{
+    if ((type != 0u) || (data == 0) || (data_length != 4u) ||
+        (data[0] != PROTO_TARGET_DISPLAY_MODE) ||
+        (data[1] != 0x01u) || (data[2] != 0x00u))
+        return;
+
+    (void)YL1650_DisplayModeSet(data[3]);
+}
+
+static Int16 proto_target_data_send(Byte port, Byte type)
+{
+    static const Byte hex_table[] = "0123456789ABCDEF";
+    static const Byte unknown_mac[6] = {0};
+    Byte reply[56] = {0};
+    proto_peer_info_t bms_peer;
+    Byte index;
+    Byte offset;
+    int8_t soc;
+    UInt32 voltage;
+    int32_t current;
+    reply[0] = 0x00;
+    reply[1] = 0x35;
+    reply[2] = 0x00;
+    reply[3] = PROTO_BMS_DISCONNECTED;
+
+    if ((s_app_ops != 0) && (s_app_ops->bms_connection_state != 0))
+        reply[3] = s_app_ops->bms_connection_state();
+
+    if ((s_app_ops != 0) && (s_app_ops->bms_peer_get != 0) && (s_app_ops->bms_peer_get(&bms_peer) == CHAR_DEV_OK))
+    {
+        // 按名称连接时，尚未获知的 MAC 保持空字段。
+        if (memcmp(bms_peer.mac_msb, unknown_mac, sizeof(unknown_mac)) != 0)
+        {
+            for (index = 0; index < 6u; ++index)
+            {
+                offset = (Byte)(index * 3u);
+                reply[4u + offset] = hex_table[(bms_peer.mac_msb[index] >> 4) & 0x0Fu];
+                reply[5u + offset] = hex_table[bms_peer.mac_msb[index] & 0x0Fu];
+
+                if (index < 5u)
+                    reply[6u + offset] = ':';
+            }
+        }
+
+        memcpy(&reply[21], bms_peer.name, sizeof(bms_peer.name));
+    }
+
+    if (s_battery_status_ready != 0)
+    {
+        soc = s_battery_status.vbat.Soc;
+        voltage = s_battery_status.vbat.Voltage;
+        current = s_battery_status.vbat.Current;
+
+        if (soc < 0)
+            reply[45] = 0;
+        else if (soc > 100)
+            reply[45] = 100;
+        else
+            reply[45] = (Byte)soc;
+
+        memcpy(&reply[46], &voltage, sizeof(voltage));
+        memcpy(&reply[50], &current, sizeof(current));
+        reply[54] = ((Byte)(s_battery_status.vbatStat & 0x03) == 1) ? 1 : 0;
+    }
+
+    reply[55] = YL1650_DisplayModeGet();
+    return Proto_Send(port, type, PROTO_CMD_SET_TARGET, reply, sizeof(reply));
+}
+
+void proto_handle_target_data(Byte port, Byte type)
+{
+    (void)proto_target_data_send(port, type);
+}
+
+Int16 Proto_TargetConnectionFailedNotify(void)
+{
+    if ((s_app_ops == 0) || (s_app_ops->bms_connection_state == 0) ||
+        (s_app_ops->bms_connection_state() != PROTO_BMS_CONNECTION_FAILED))
+        return -1;
+
+    return proto_target_data_send(s_target_request_port, s_target_request_type);
+}
+
+static void proto_handle_target_config(Byte port, Byte type, const Byte *data, UInt16 data_length)
+{
+    Byte failure[3] = {0, 0, 0};
+    Byte address_msb[6];
+    UInt16 value_length;
+    Int16 result = CHAR_DEV_ERR_PARAM;
+
+    if ((data == 0) || (data_length == 0))
+        return;
+
+    failure[0] = data[0];
+
+    if (data_length >= 3)
+    {
+        value_length = (UInt16)data[1] | ((UInt16)data[2] << 8);
+
+        if (data_length == (UInt16)(value_length + 3))
+        {
+            if ((data[0] == PROTO_TARGET_NAME) && (value_length == PROTO_TARGET_NAME_SIZE))
+            {
+                if ((s_app_ops != 0) && (s_app_ops->target_name_set != 0))
+                    result = s_app_ops->target_name_set(&data[3], value_length);
+            }
+            else if ((data[0] == PROTO_TARGET_MAC) && (value_length == PROTO_TARGET_MAC_TEXT_SIZE) && (proto_target_mac_parse(&data[3], value_length, address_msb) != 0))
+            {
+                if ((s_app_ops != 0) && (s_app_ops->target_address_set != 0))
+                    result = s_app_ops->target_address_set(address_msb);
+            }
+        }
+    }
+
+    if (result == CHAR_DEV_OK)
+    {
+        s_target_request_port = port;
+        s_target_request_type = type;
+        (void)Proto_Send(port, type, PROTO_CMD_SET_TARGET, data, data_length);
+    }
+    else
+        (void)Proto_Send(port, type, PROTO_CMD_SET_TARGET, failure, sizeof(failure));
+}
+
+//协议解析
+static void proto_dispatch(Byte port, Byte type, Byte command, const Byte *data, UInt16 data_length)
+{
+    if ((FirmwareUpdate_IsActive() != 0) && (command != PROTO_CMD_UPDATE))
+    {
+        if ((command == PROTO_CMD_SET_LOCAL_IDENTITY) && (type == 0u) &&
+            (port != PROTO_PORT_BLE_MASTER))
+        {
+            static const Byte busy_reply[] = {0xFFu, 0x00u, 0x00u, 0x00u};
+            (void)Proto_Send(port, type, PROTO_CMD_SET_LOCAL_IDENTITY,
+                             busy_reply, sizeof(busy_reply));
+        }
+        return;
+    }
+
+    switch (command)
+    {
+        case PROTO_CMD_X11:
+            if (port == PROTO_PORT_BLE_MASTER)
+                proto_handle_x11(data, data_length);
+            else if (port == PROTO_PORT_BLE_SLAVE)
+                proto_handle_phone_x11_request(port, type, data, data_length);
+
+            break;
+
+        case PROTO_CMD_UPDATE:
+            if (port != PROTO_PORT_BLE_MASTER)
+                FirmwareUpdate_Handle(port, type, data, data_length);
+
+            break;
+
+        case PROTO_CMD_X16:
+            if (port == PROTO_PORT_BLE_MASTER)
+                proto_handle_x16(data, data_length);
+            else if (port == PROTO_PORT_BLE_SLAVE)
+                proto_handle_phone_x16_request(port, type, data, data_length);
+
+            break;
+
+        case PROTO_CMD_SET_LOCAL_IDENTITY:
+            if (port != PROTO_PORT_BLE_MASTER)
+                proto_handle_local_identity(port, type, data, data_length);
+
+            break;
+
+        case PROTO_CMD_SET_LOCAL_NAME:
+            if (port != PROTO_PORT_BLE_MASTER)
+                proto_handle_local_name(port, type, data, data_length);
+
+            break;
+
+        case PROTO_CMD_SET_LOCAL_MAC:
+            if (port != PROTO_PORT_BLE_MASTER)
+                proto_handle_local_mac(port, type, data, data_length);
+
+            break;
+
+        case PROTO_CMD_SET_TARGET:
+        {
+            if ((port != PROTO_PORT_BLE_MASTER) && (data != 0) && (data_length == 3) && (data[0] == PROTO_TARGET_SCREEN_DATA) && (data[1] == 0x00) && (data[2] == 0x00))
+                proto_handle_target_data(port, type);
+            else if ((port != PROTO_PORT_BLE_MASTER) && (data != 0) && (data_length != 0u) && (data[0] == PROTO_TARGET_UNBIND))
+                proto_handle_target_unbind(port, type, data, data_length);
+            else if ((port != PROTO_PORT_BLE_MASTER) && (data != 0) && (data_length != 0u) && (data[0] == PROTO_TARGET_DISPLAY_MODE))
+                proto_handle_display_mode(type, data, data_length);
+            else if (port != PROTO_PORT_BLE_MASTER)
+                proto_handle_target_config(port, type, data, data_length);
+
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+static void proto_handle_rx(Byte port, const Byte *frame,
+                            UInt16 length)
+{
+    if (proto_frame_is_valid(frame, length) == 0)
+        return;
+
+    proto_dispatch(port, frame[2], frame[3], &frame[4],
+                   (UInt16)(length - 6u));
+}
+
+static void proto_uart_consume(proto_uart_rx_t *receiver, UInt16 length)
+{
+    UInt16 remaining;
+
+    if (length >= receiver->length)
+    {
+        receiver->length = 0;
+        return;
+    }
+
+    remaining = (UInt16)(receiver->length - length);
+    memmove(receiver->data, &receiver->data[length], remaining);
+    receiver->length = remaining;
+}
+
+static void proto_uart_resync(proto_uart_rx_t *receiver)
+{
+    UInt16 offset = 0;
+
+    while ((offset + 1) < receiver->length)
+    {
+        if ((receiver->data[offset] == PROTO_HEAD1) &&
+            (receiver->data[offset + 1] == PROTO_HEAD2))
+        {
+            proto_uart_consume(receiver, offset);
+            return;
+        }
+
+        offset++;
+    }
+
+    if ((receiver->length != 0) &&
+        (receiver->data[receiver->length - 1] == PROTO_HEAD1))
+    {
+        receiver->data[0] = PROTO_HEAD1;
+        receiver->length = 1;
+    }
+    else
+        receiver->length = 0;
+}
+
+static void proto_uart_extract(Byte port, proto_uart_rx_t *receiver,
+                               Byte flush)
+{
+    UInt16 boundary;
+
+    for (;;)
+    {
+        proto_uart_resync(receiver);
+
+        if (receiver->length < 6u)
+            return;
+
+        if (receiver->data[3] == PROTO_CMD_SET_LOCAL_IDENTITY)
+        {
+            if (receiver->length < PROTO_IDENTITY_FRAME_SIZE)
+                return;
+            proto_handle_rx(port, receiver->data, PROTO_IDENTITY_FRAME_SIZE);
+            proto_uart_consume(receiver, PROTO_IDENTITY_FRAME_SIZE);
+            continue;
+        }
+
+        for (boundary = 6u; (boundary + 1) < receiver->length;
+             boundary++)
+        {
+            if ((receiver->data[boundary] == PROTO_HEAD1) &&
+                (receiver->data[boundary + 1] == PROTO_HEAD2) &&
+                (proto_frame_is_valid(receiver->data, boundary) != 0))
+            {
+                proto_handle_rx(port, receiver->data, boundary);
+                proto_uart_consume(receiver, boundary);
+                break;
+            }
+        }
+
+        if ((boundary + 1) < receiver->length)
+            continue;
+
+        if ((flush != 0) &&
+            (proto_frame_is_valid(receiver->data, receiver->length) != 0))
+        {
+            proto_handle_rx(port, receiver->data, receiver->length);
+            receiver->length = 0;
+        }
+
+        return;
+    }
+}
+
+// 接收 UART 字节流；空数据调用用于提交当前批次。
+void Proto_UartRxCallback(Byte port, const Byte *data,
+                          UInt16 length)
+{
+    proto_uart_rx_t *receiver;
+    Byte index;
+
+    if ((port != PROTO_PORT_UART1) && (port != PROTO_PORT_UART2))
+        return;
+
+    index = (Byte)(port - PROTO_PORT_UART1);
+    receiver = &s_uart_rx[index];
+
+    if (length != 0)
+    {
+        if (data == 0)
+            return;
+
+        if ((length > sizeof(receiver->data)) || ((UInt32)receiver->length + length > sizeof(receiver->data)))
+        {
+            receiver->length = 0;
+
+            if (length > sizeof(receiver->data))
+                return;
+        }
+
+        memcpy(&receiver->data[receiver->length], data, length);
+        receiver->length = (UInt16)(receiver->length + length);
+        proto_uart_extract(port, receiver, 0);
+    }
+    else
+        proto_uart_extract(port, receiver, 1);
+}
+
+void Proto_PhoneRxReset(void)
+{
+    s_phone_identity_length = 0u;
+}
+
+Byte Proto_BleLocalRxPending(void)
+{
+    return (Byte)(s_phone_identity_length != 0u);
+}
+
+static Byte proto_phone_identity_prefix(const Byte *data, UInt16 length)
+{
+    static const Byte prefix[] = {PROTO_HEAD1, PROTO_HEAD2, 0u, PROTO_CMD_SET_LOCAL_IDENTITY};
+    UInt16 compare_length = (length < sizeof(prefix)) ? length : sizeof(prefix);
+    return (Byte)((compare_length != 0u) &&
+                  (memcmp(data, prefix, compare_length) == 0));
+}
+
+Byte Proto_PhoneRxCallback(const Byte *data, UInt16 length)
+{
+    Byte consumed = 0u;
+    UInt16 copy_length;
+    UInt16 frame_length;
+
+    if ((data == 0) || (length == 0u))
+        return 0u;
+
+    if ((s_phone_identity_length != 0u) &&
+        (((s_phone_identity_length < 35u) || (s_phone_identity_length >= 44u)) ||
+         (length > (PROTO_IDENTITY_FRAME_SIZE - s_phone_identity_length))) &&
+        (proto_frame_is_valid(data, length) != 0u))
+    {
+        switch (data[3])
+        {
+            case PROTO_CMD_SET_LOCAL_IDENTITY:
+                if (length == PROTO_IDENTITY_FRAME_SIZE)
+                    Proto_PhoneRxReset();
+                break;
+            case PROTO_CMD_SET_LOCAL_NAME:
+            case PROTO_CMD_SET_LOCAL_MAC:
+            case PROTO_CMD_SET_TARGET:
+            case PROTO_CMD_X11:
+            case PROTO_CMD_X16:
+            case PROTO_CMD_UPDATE:
+                Proto_PhoneRxReset();
+                break;
+            default:
+                break;
+        }
+    }
+
+    while (length != 0u)
+    {
+        if ((s_phone_identity_length == 0u) &&
+            (proto_phone_identity_prefix(data, length) == 0u))
+        {
+            frame_length = length;
+            if ((consumed != 0u) && (length >= 7u) &&
+                (data[0] == PROTO_HEAD1) && (data[1] == PROTO_HEAD2) &&
+                (data[3] == PROTO_CMD_SET_TARGET))
+            {
+                UInt32 candidate = 9u + (UInt32)data[5] + ((UInt32)data[6] << 8);
+                if (candidate <= length)
+                    frame_length = (UInt16)candidate;
+            }
+            proto_handle_rx(PROTO_PORT_BLE_SLAVE, data, frame_length);
+            data += frame_length;
+            length = (UInt16)(length - frame_length);
+            continue;
+        }
+
+        consumed = 1u;
+        copy_length = (UInt16)(PROTO_IDENTITY_FRAME_SIZE - s_phone_identity_length);
+        if (copy_length > length)
+            copy_length = length;
+        memcpy(&s_phone_identity_rx[s_phone_identity_length], data, copy_length);
+        s_phone_identity_length = (UInt16)(s_phone_identity_length + copy_length);
+        data += copy_length;
+        length = (UInt16)(length - copy_length);
+
+        if (proto_phone_identity_prefix(s_phone_identity_rx, s_phone_identity_length) == 0u)
+        {
+            Proto_PhoneRxReset();
+            return 1u;
+        }
+        if (s_phone_identity_length == PROTO_IDENTITY_FRAME_SIZE)
+        {
+            proto_handle_rx(PROTO_PORT_BLE_SLAVE, s_phone_identity_rx,
+                            PROTO_IDENTITY_FRAME_SIZE);
+            Proto_PhoneRxReset();
+        }
+    }
+    return consumed;
+}
+
+// 接收 BLE 数据；手机 0x19 支持固定长度分片，其他协议保留原路由。
+void Proto_BleRxCallback(Byte port, const Byte *data, UInt16 length)
+{
+    proto_uart_rx_t *receiver;
+
+    if ((data == 0) || (length == 0u))
+        return;
+
+    if (port == PROTO_PORT_BLE_SLAVE)
+    {
+        (void)Proto_PhoneRxCallback(data, length);
+        return;
+    }
+
+    if (port != PROTO_PORT_BLE_MASTER)
+        return;
+
+    receiver = &s_bms_ble_rx;
+
+    if (length > sizeof(receiver->data))
+    {
+        receiver->length = 0u;
+        return;
+    }
+
+    if (((UInt32)receiver->length + length) > sizeof(receiver->data))
+        receiver->length = 0u;
+
+    memcpy(&receiver->data[receiver->length], data, length);
+    receiver->length = (UInt16)(receiver->length + length);
+    proto_uart_extract(port, receiver, 1u);
+}
+
+// 初始化协议状态。 
+void Proto_Init(const proto_app_ops_t *ops)
+{
+    s_app_ops = ops;
+    Proto_PhoneRxReset();
+    Proto_TargetRequestReset();
+    FirmwareUpdate_SendBind(proto_update_send);
+    memset(&s_battery_status, 0, sizeof(s_battery_status));
+    memset(&s_study_data, 0, sizeof(s_study_data));
+    memset(&s_study_extension, 0, sizeof(s_study_extension));
+    memset(s_study_prefix, 0, sizeof(s_study_prefix));
+    memset(s_uart_rx, 0, sizeof(s_uart_rx));
+    memset(&s_bms_ble_rx, 0, sizeof(s_bms_ble_rx));
+    memset(s_proto_device, 0, sizeof(s_proto_device));
+    s_battery_status_ready = 0;
+    s_study_data_ready = 0;
+    s_study_extension_ready = 0;
+    proto_fake_data_init();
+}
+
+void Proto_BmsDataInvalidate(void)
+{
+    s_bms_ble_rx.length = 0u;
+    memset(&s_battery_status, 0, sizeof(s_battery_status));
+    memset(&s_study_data, 0, sizeof(s_study_data));
+    memset(&s_study_extension, 0, sizeof(s_study_extension));
+    memset(s_study_prefix, 0, sizeof(s_study_prefix));
+    s_battery_status_ready = 0;
+    s_study_data_ready = 0;
+    s_study_extension_ready = 0;
+}
+
+Byte Proto_IsBatteryStatusReady(void)
+{
+    return s_battery_status_ready;
+}
+
+Byte Proto_IsStudyDataReady(void)
+{
+    return s_study_data_ready;
+}
+
+const com_0x11_type *Proto_GetBatteryStatus(void)
+{
+    return &s_battery_status;
+}
+
+const StudyType *Proto_GetStudyData(void)
+{
+    return &s_study_data;
+}

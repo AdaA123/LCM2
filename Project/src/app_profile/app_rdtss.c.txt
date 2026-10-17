@@ -1,0 +1,453 @@
+#include "rwip_config.h"
+
+#if (BLE_RDTSS_SERVER)
+
+/* Includes ------------------------------------------------------------------*/
+#include <string.h>
+#include "co_utils.h"
+#include "app_rdtss.h"
+#include "app_rdtss_queue.h"
+#include "rdtss_task.h"
+#include "rdtss.h"
+#include "gapm_task.h"
+#include "prf.h"
+#include "ns_ble.h"
+#include "ns_log.h"
+#include "ble_port_rw.h"
+#include "ke_timer.h"
+#include "Mytask.h"
+
+
+const uint8_t app_rdts_svc_uuid[16] = ATT_SERVICE_GW_RDT_128;
+
+const struct attm_desc_128 app_rdts_att_db[RDTSS_IDX_NB] =
+{
+    /* [0] 主服务声明 FF00 (动态起始句柄 shdl) */
+    [RDTSS_IDX_SVC] =
+    {
+        {0x00, 0x28},
+        PERM(RD, ENABLE),
+        0,
+        0
+    },
+
+    /* ===== FF01 (Read|Notify) 上行数据通道: 声明+1 / 值+2 / CCCD+3 (Notify 在前) ===== */
+    [RDTSS_IDX_NTF_CHAR] =            /* [1] FF01 特征声明 (shdl+1) */
+    {
+        {0x03, 0x28},
+        PERM(RD, ENABLE),
+        0,
+        0
+    },
+    [RDTSS_IDX_NTF_VAL] =             /* [2] FF01 值: Read|Notify (shdl+2) */
+    {
+        ATT_CHAR_GW_TX_NTF_128,
+        PERM(RD, ENABLE) | PERM(NTF, ENABLE),
+        PERM(RI, ENABLE) | PERM_VAL(UUID_LEN, 0x02),
+        0x200
+    },
+    [RDTSS_IDX_NTF_CFG] =             /* [3] FF01 CCCD 0x2902 (shdl+3) */
+    {
+        {0x02, 0x29},
+        PERM(RD, ENABLE) | PERM(WRITE_REQ, ENABLE),
+        PERM(RI, ENABLE),
+        20
+    },
+
+    /* ===== FF02 (WriteWithoutResponse|Write) 下行入口: 声明+4 / 值+5 ===== */
+    [RDTSS_IDX_WRITE_CHAR] =          /* [4] FF02 特征声明 (shdl+4) */
+    {
+        {0x03, 0x28},
+        PERM(RD, ENABLE),
+        0,
+        0
+    },
+    [RDTSS_IDX_WRITE_VAL] =           /* [5] FF02 值: 55AA 配网 + 透传 (shdl+5) */
+    {
+        ATT_CHAR_GW_RX_WRITE_128,
+        PERM(WRITE_REQ, ENABLE) | PERM(WRITE_COMMAND, ENABLE),
+        PERM(RI, ENABLE) | PERM_VAL(UUID_LEN, 0x02),
+        0x200
+    },
+};
+
+#define GW_TX_Q_DEPTH        8
+#define GW_TX_CFM_WDG_MS     800u
+#define GW_TX_PAYLOAD_MAX    APP_RDTSS_QUEUE_PAYLOAD_MAX
+#define GW_MAX_CONN          5
+
+static app_rdtss_queue_item_t s_tx_q[GW_TX_Q_DEPTH];
+static uint8_t  s_tx_head = 0;
+static uint8_t  s_tx_tail = 0;
+static bool     s_tx_busy = false;
+static uint16_t s_tx_token = BLE_PORT_TX_TOKEN_UNKNOWN;
+static uint8_t s_tx_conidx = BLE_PORT_CONN_INDEX_UNKNOWN;
+static bool     s_ntf_en[GW_MAX_CONN];
+static uint32_t s_tx_drop = 0;
+static uint32_t s_tx_cfm_cnt = 0;
+static uint32_t s_tx_req_cnt = 0;
+
+#define TX_WDG_STRIKES      3u
+static uint32_t s_tx_checkpoint_ms = 0u;
+static uint8_t  s_wdg_strikes = 0;
+
+static void tx_try_send(void);
+
+static void tx_reset_inflight(void)
+{
+    s_tx_busy = false;
+    s_tx_token = BLE_PORT_TX_TOKEN_UNKNOWN;
+    s_tx_conidx = BLE_PORT_CONN_INDEX_UNKNOWN;
+    s_tx_checkpoint_ms = 0u;
+    s_wdg_strikes = 0u;
+}
+
+static void tx_try_send(void)
+{
+    app_rdtss_queue_item_t *item;
+
+    if(s_tx_busy)
+    {
+        NS_LOG_WARNING("[APP_DATA] TX blocked by busy\r\n");
+        return;
+    }
+
+    if(s_tx_head == s_tx_tail)
+        return;     /* 队列空 */
+
+    item = &s_tx_q[s_tx_tail];
+    s_tx_token = item->tx_token;
+    s_tx_conidx = item->conidx;
+    s_tx_checkpoint_ms = TaskGetTick();
+    s_wdg_strikes = 0u;
+    s_tx_busy = true;
+    {
+        struct rdtss_val_ntf_ind_req *req = KE_MSG_ALLOC_DYN(RDTSS_VAL_NTF_REQ,
+                                            prf_get_task_from_id(TASK_ID_RDTSS),
+                                            TASK_APP,
+                                            rdtss_val_ntf_ind_req,
+                                            item->len);
+        req->conidx       = item->conidx;
+        req->notification = true;
+        req->tx_token     = item->tx_token;
+        req->tx_generation = rdtss_get_tx_generation(item->conidx);
+        req->handle       = item->att_idx;  /* Profile 内部换算 shdl + idx */
+        req->length       = item->len;
+        memcpy(&req->value[0], item->data, item->len);
+        ke_msg_send(req);
+    }
+    s_tx_req_cnt++;
+    s_tx_tail = (uint8_t)((s_tx_tail + 1u) % GW_TX_Q_DEPTH);
+}
+
+static bool tx_push(uint8_t conidx, uint8_t att_idx, uint16_t tx_token,
+                    const uint8_t *data, uint16_t len)
+{
+    if((conidx >= GW_MAX_CONN) ||
+       (tx_token == BLE_PORT_TX_TOKEN_UNKNOWN) ||
+       (data == NULL) || (len == 0))
+    {
+        NS_LOG_WARNING("[APP_DATA] TX push invalid arg (conidx=%d len=%u)\r\n", conidx, (unsigned)len);
+        return false;
+    }
+
+    if(!s_ntf_en[conidx])
+        return false;
+
+    if(len > GW_TX_PAYLOAD_MAX)
+    {
+        s_tx_drop++;
+        NS_LOG_ERROR("[APP_DATA] TX Dropped (len %u > %u payload cap), drop_total=%u\r\n",
+                     (unsigned)len, GW_TX_PAYLOAD_MAX, (unsigned)s_tx_drop);
+        return false;
+    }
+
+    if((uint8_t)((s_tx_head + 1u) % GW_TX_Q_DEPTH) == s_tx_tail)
+    {
+        tx_try_send();
+
+        if((uint8_t)((s_tx_head + 1u) % GW_TX_Q_DEPTH) == s_tx_tail)
+        {
+            s_tx_drop++;
+            NS_LOG_ERROR("[APP_DATA] TX queue FULL (depth=%d) -> packet DROPPED, drop_total=%u "
+                         "[hint: phone link congested]\r\n", GW_TX_Q_DEPTH, (unsigned)s_tx_drop);
+            return false;
+        }
+    }
+
+    s_tx_q[s_tx_head].conidx  = conidx;
+    s_tx_q[s_tx_head].att_idx = att_idx;
+    s_tx_q[s_tx_head].tx_token = tx_token;
+    s_tx_q[s_tx_head].len     = len;
+    memcpy(s_tx_q[s_tx_head].data, data, len);
+    s_tx_head = (uint8_t)((s_tx_head + 1u) % GW_TX_Q_DEPTH);
+    tx_try_send();
+    return true;
+}
+
+static uint8_t tx_flush_conidx(uint8_t conidx)
+{
+    return AppRdtssQueue_RemoveConnection(
+               s_tx_q, GW_TX_Q_DEPTH, s_tx_tail, &s_tx_head, conidx);
+}
+
+bool app_rdtss_notify_raw(uint8_t conidx, uint16_t tx_token,
+                          const uint8_t *data, uint16_t length)
+{
+    return tx_push(conidx, (uint8_t)RDTSS_IDX_NTF_VAL, tx_token,
+                   data, length);
+}
+
+void app_rdtss_on_link_lost(uint8_t conidx)
+{
+    uint8_t dropped;
+
+    if(conidx >= GW_MAX_CONN)
+        return;
+
+    dropped = tx_flush_conidx(conidx);
+
+    if(s_ntf_en[conidx] || (dropped > 0))
+    {
+        NS_LOG_INFO("[APP_DATA] Link lost (conidx=%d): flushed %u queued packets, CCCD state reset\r\n",
+                    conidx, dropped);
+    }
+
+    s_ntf_en[conidx] = false;
+
+    if(s_tx_busy && s_tx_conidx == conidx)
+        tx_reset_inflight();
+
+    tx_try_send();
+}
+
+void app_rdtss_tx_poll(void)
+{
+    uint32_t now;
+
+    /* Poll frequency changes with RX load; it is not a clock. */
+    if(!s_tx_busy || s_wdg_strikes >= TX_WDG_STRIKES)
+        return;
+
+    now = TaskGetTick();
+
+    if((uint32_t)(now - s_tx_checkpoint_ms) < GW_TX_CFM_WDG_MS)
+        return;
+
+    s_tx_checkpoint_ms = now;
+    s_wdg_strikes++;
+
+    if(s_wdg_strikes >= TX_WDG_STRIKES)
+    {
+        uint8_t conidx = ble_port_conn_index_of(BLE_ENDPOINT_PHONE);
+
+        if(conidx == BLE_PORT_CONN_INDEX_UNKNOWN || conidx != s_tx_conidx)
+            return;
+
+        /* One recovery request only; keep busy until CFM or link cleanup. */
+        NS_LOG_INFO("[APP_DATA] TX CFM stalled: %u x %ums, reset phone conidx=%u token=%u\r\n",
+                    (unsigned)TX_WDG_STRIKES, (unsigned)GW_TX_CFM_WDG_MS,
+                    (unsigned)conidx, (unsigned)s_tx_token);
+        tx_flush_conidx(conidx);
+        ns_ble_set_active_connection(conidx);
+        ns_ble_disconnect();
+    }
+}
+
+uint16_t app_rdtss_get_tx_handle(void)
+{
+    struct rdtss_env_tag *env = (struct rdtss_env_tag *)prf_env_get(TASK_ID_RDTSS);
+
+    if(env != NULL)
+        return (uint16_t)(env->shdl + RDTSS_IDX_NTF_VAL);
+
+    return 0xFFFF;    /* Profile 未就绪 */
+}
+
+uint16_t app_rdtss_get_rx_handle(void)
+{
+    struct rdtss_env_tag *env = (struct rdtss_env_tag *)prf_env_get(TASK_ID_RDTSS);
+
+    if(env != NULL)
+        return (uint16_t)(env->shdl + RDTSS_IDX_WRITE_VAL);
+
+    return 0xFFFF;
+}
+
+static int rdtss_value_req_ind_handler(ke_msg_id_t const msgid,
+                                       struct rdtss_value_req_ind const *req_value,
+                                       ke_task_id_t const dest_id,
+                                       ke_task_id_t const src_id)
+{
+    struct rdtss_value_req_rsp *rsp_value;
+    uint8_t len = APP_RDTSS_MANUFACTURER_NAME_LEN;
+    const uint8_t *data = (const uint8_t *)APP_RDTSS_MANUFACTURER_NAME;
+    NS_LOG_INFO("[GATT_PRF] Read Request: conidx=%d, att_idx=%d -> reply \"%s\"\r\n",
+                req_value->conidx, req_value->att_idx, APP_RDTSS_MANUFACTURER_NAME);
+    rsp_value = KE_MSG_ALLOC_DYN(RDTSS_VALUE_REQ_RSP, src_id, dest_id,
+                                 rdtss_value_req_rsp, len);
+    rsp_value->status  = ATT_ERR_NO_ERROR;
+    rsp_value->conidx  = req_value->conidx;
+    rsp_value->length  = len;
+    rsp_value->att_idx = req_value->att_idx;
+    memcpy(&rsp_value->value[0], data, len);
+    ke_msg_send(rsp_value);
+    return (KE_MSG_CONSUMED);
+}
+
+static int rdtss_val_write_ind_handler(ke_msg_id_t const msgid,
+                                       struct rdtss_val_write_ind const *ind_value,
+                                       ke_task_id_t const dest_id,
+                                       ke_task_id_t const src_id)
+{
+    uint8_t  conidx = ind_value->conidx;
+    uint16_t idx    = ind_value->handle;
+    uint16_t length = ind_value->length;
+
+    switch(idx)
+    {
+        case RDTSS_IDX_WRITE_VAL:
+            if((length >= 3) && (ind_value->value[0] == 0x55) && (ind_value->value[1] == 0xAA) &&
+               (ind_value->value[2] == 0x01 || ind_value->value[2] == 0x02))   /* v2.1d: PROV tag only for internal types */
+            {
+                uint16_t i;
+                NS_LOG_INFO("[APP_DATA] DL PROV write (conidx=%d, len=%u):", conidx, (unsigned)length);
+
+                for(i = 0; i < length && i < 32; i++)
+                    NS_LOG_INFO(" %02X", ind_value->value[i]);
+
+                NS_LOG_INFO("\r\n");
+            }
+            else
+                NS_LOG_DEBUG("[APP_DATA] DL write (conidx=%d, len=%u)\r\n", conidx, (unsigned)length);
+
+            ble_port_data_rx(conidx, ind_value->value, length);
+            break;
+
+        case RDTSS_IDX_NTF_CFG:
+            if(length == 2)
+            {
+                uint16_t cfg = (uint16_t)(ind_value->value[0] | (ind_value->value[1] << 8));
+
+                if(cfg == PRF_CLI_START_NTF)
+                {
+                    if(conidx >= GW_MAX_CONN)
+                        break;
+
+                    s_ntf_en[conidx] = true;
+
+                    if(ble_port_phone_cccd_set(conidx, 1u) != CHAR_DEV_OK)
+                    {
+                        s_ntf_en[conidx] = false;
+                        NS_LOG_WARNING("[GATT_PRF] Ignore CCCD ENABLE from stale conidx=%d\r\n",
+                                       conidx);
+                        break;
+                    }
+
+                    NS_LOG_INFO("[GATT_PRF] CCCD ENABLED (0x%04X) by phone conidx=%d -> Phone TX ready\r\n",
+                                cfg, conidx);
+                }
+                else if(cfg == PRF_CLI_STOP_NTFIND)
+                {
+                    if(conidx >= GW_MAX_CONN)
+                        break;
+
+                    s_ntf_en[conidx] = false;
+                    (void)tx_flush_conidx(conidx);
+
+                    if(s_tx_busy && s_tx_conidx == conidx)
+                        tx_reset_inflight();
+
+                    (void)ble_port_phone_cccd_set(conidx, 0u);
+                    NS_LOG_INFO("[GATT_PRF] CCCD DISABLED by phone conidx=%d -> Phone TX stopped\r\n",
+                                conidx);
+                }
+                else
+                    NS_LOG_WARNING("[GATT_PRF] CCCD invalid value 0x%04X from conidx=%d\r\n", cfg, conidx);
+            }
+            else
+                NS_LOG_WARNING("[GATT_PRF] CCCD bad length %u from conidx=%d\r\n", (unsigned)length, conidx);
+
+            break;
+
+        default:
+            NS_LOG_WARNING("[GATT_PRF] WRITE to unexpected att_idx=%u (conidx=%d, len=%u) - ignored\r\n",
+                           (unsigned)idx, conidx, (unsigned)length);
+            break;
+    }
+
+    return (KE_MSG_CONSUMED);
+}
+
+static int rdtss_val_ntf_cfm_handler(ke_msg_id_t const msgid,
+                                     struct rdtss_val_ntf_cfm const *cfm_value,
+                                     ke_task_id_t const dest_id,
+                                     ke_task_id_t const src_id)
+{
+    if(!s_tx_busy || cfm_value->conidx != s_tx_conidx ||
+       cfm_value->tx_token != s_tx_token)
+    {
+        NS_LOG_WARNING("[APP_DATA] Ignore stale Notify CFM\r\n");
+        return (KE_MSG_CONSUMED);
+    }
+
+    if(cfm_value->status != ATT_ERR_NO_ERROR)
+    {
+        NS_LOG_INFO("[GATT_PRF] Notify CFM status=0x%02X conidx=%u token=%u\r\n",
+                    cfm_value->status, (unsigned)cfm_value->conidx,
+                    (unsigned)cfm_value->tx_token);
+    }
+
+    tx_reset_inflight();
+    s_tx_cfm_cnt++;
+    /* Release this submission, including a failed one, as before. */
+    ble_port_on_tx_cfm(BLE_ENDPOINT_PHONE, cfm_value->conidx,
+                       cfm_value->tx_token);
+    tx_try_send();
+    return (KE_MSG_CONSUMED);
+}
+
+const struct ke_msg_handler app_rdtss_msg_handler_list[] =
+{
+    {RDTSS_VALUE_REQ_IND, (ke_msg_func_t)rdtss_value_req_ind_handler},
+    {RDTSS_VAL_WRITE_IND, (ke_msg_func_t)rdtss_val_write_ind_handler},
+    {RDTSS_VAL_NTF_CFM, (ke_msg_func_t)rdtss_val_ntf_cfm_handler},
+};
+
+const struct app_subtask_handlers app_rdtss_handlers = APP_HANDLERS(app_rdtss);
+
+void app_rdtss_add_rdts(void)
+{
+    struct rdtss_db_cfg *db_cfg;
+    struct gapm_profile_task_add_cmd *req;
+    req = KE_MSG_ALLOC_DYN(GAPM_PROFILE_TASK_ADD_CMD, TASK_GAPM, TASK_APP,
+                           gapm_profile_task_add_cmd, sizeof(struct rdtss_db_cfg));
+    req->operation   = GAPM_PROFILE_TASK_ADD;
+    req->sec_lvl     = PERM(SVC_AUTH, NO_AUTH);
+    req->prf_task_id = TASK_ID_RDTSS;
+    req->app_task    = TASK_APP;
+    req->start_hdl   = 0;
+    db_cfg = (struct rdtss_db_cfg *)req->param;
+    db_cfg->att_tbl    = &app_rdts_att_db[0];
+    db_cfg->svc_uuid   = &app_rdts_svc_uuid[0];
+    db_cfg->max_nb_att = RDTSS_IDX_NB;
+    ke_msg_send(req);
+    NS_LOG_INFO("[GATT_PRF] RDTSS DB registering: svc=FF00 chars=FF01/FF02/5401/5400 (%u attrs, dynamic hdl)\r\n",
+                (unsigned)RDTSS_IDX_NB);
+    app_rdtss_init();
+}
+
+void app_rdtss_init(void)
+{
+    struct prf_task_t prf;
+    struct prf_get_func_t get_func;
+    prf.prf_task_id     = TASK_ID_RDTSS;
+    prf.prf_task_handler = &app_rdtss_handlers;
+    ns_ble_prf_task_register(&prf);
+    get_func.task_id        = TASK_ID_RDTSS;
+    get_func.prf_itf_get_func = rdtss_prf_itf_get;
+    prf_get_itf_func_register(&get_func);
+    NS_LOG_INFO("[GATT_PRF] RDTSS Server task registered (task_id=%d)\r\n", TASK_ID_RDTSS);
+}
+
+#endif // BLE_RDTSS_SERVER

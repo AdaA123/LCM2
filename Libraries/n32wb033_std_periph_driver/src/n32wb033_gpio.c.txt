@@ -1,0 +1,1154 @@
+/**
+*     Copyright (c) 2026, Nsing Technologies Inc.
+*
+*     All rights reserved.
+*
+*     This software is the exclusive property of Nsing Technologies Inc. (Hereinafter
+* referred to as Nsing). This software, and the product of Nsing described herein
+* (Hereinafter referred to as the Product) are owned by Nsing under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     Nsing does not grant any license under its patents, copyrights, trademarks, or other
+* intellectual property rights. Names and brands of third party may be mentioned or referred
+* thereto (if any) for identification purposes only.
+*
+*     Nsing reserves the right to make changes, corrections, enhancements, modifications, and
+* improvements to this software at any time without notice. Please contact Nsing and obtain
+* the latest version of this software before placing orders.
+
+*     Although Nsing has attempted to provide accurate and reliable information, Nsing assumes
+* no responsibility for the accuracy and reliability of this software.
+*
+*     It is the responsibility of the user of this software to properly design, program, and test
+* the functionality and safety of any application made of this information and any resulting product.
+* In no event shall Nsing be liable for any direct, indirect, incidental, special,exemplary, or
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     Nsing Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify Nsing and hold Nsing
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by Nsing, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     Nsing products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations.
+* User shall comply with any applicable export control laws and regulations promulgated and administered by
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+/**
+*\*\file n32wb033_gpio.c
+*\*\author Nsing
+*\*\version v1.0.0
+*\*\copyright Copyright (c) 2026, Nsing Technologies Inc. All rights reserved.
+**/
+#include "n32wb033_gpio.h"
+#include "n32wb033_rcc.h"
+
+/**
+ *\*\name   GPIO_DeInit.
+ *\*\fun    Reset the GPIOx peripheral registers to their default reset values.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\return none
+ */
+void GPIO_DeInit(const GPIO_Module* GPIOx)
+{
+    if (GPIOx == GPIOA)
+    {
+        RCC_EnableAPB2PeriphReset(RCC_APB2_PERIPH_GPIOA);
+    }
+    else if (GPIOx == GPIOB)
+    {
+        RCC_EnableAPB2PeriphReset(RCC_APB2_PERIPH_GPIOB);
+    }
+    else if (GPIOx == GPIOC)
+    {
+        RCC_EnableAPB2PeriphReset(RCC_APB2_PERIPH_GPIOC);
+    }
+    else
+    {
+        /* No Process */
+    }
+}
+
+/**
+ *\*\name   GPIO_DeInitPin.
+ *\*\fun    Deinitializes the GPIOx peripheral registers to their default reset values.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  Pin :
+ *\*\          - GPIO_PIN_0
+ *\*\          - GPIO_PIN_1
+ *\*\          - GPIO_PIN_2
+ *\*\          - GPIO_PIN_3
+ *\*\          - GPIO_PIN_4
+ *\*\          - GPIO_PIN_5
+ *\*\          - GPIO_PIN_6
+ *\*\          - GPIO_PIN_7
+ *\*\          - GPIO_PIN_8
+ *\*\          - GPIO_PIN_9
+ *\*\          - GPIO_PIN_10
+ *\*\          - GPIO_PIN_11
+ *\*\          - GPIO_PIN_12
+ *\*\          - GPIO_PIN_13
+ *\*\          - GPIO_PIN_14
+ *\*\          - GPIO_PIN_15
+ *\*\          - GPIO_PIN_ALL
+ *\*\return none
+ */
+void GPIO_DeInitPin(GPIO_Module* GPIOx, uint32_t Pin)
+{
+    uint32_t pos = 0x00U, currentpin;
+
+    while ((Pin >> pos) != 0U)
+    {
+        currentpin = (Pin) & ((uint32_t)1U << pos);
+
+        if (currentpin > 0U)
+        {
+            /*------------------------- GPIO Mode/PULL/AFH/AFL Configuration --------------------*/
+            /* Configure GPIO as Analog Mode by default, except for the following pins:
+             * PA4 (SWCLK): Input mode, Pull-Down, AF0
+             * PA5 (SWDIO): Input mode, Pull-Up, AF0
+             * Note: WB033 debug pins are PA4/PA5.
+             */
+            if ((GPIOA == GPIOx) && (currentpin == GPIO_PIN_4))
+            {
+                /* PA4 = SWCLK: Input mode, Pull-Down, AF0 */
+                GPIOx->PMODE &= ~GPIO_PMODE_PMODE4_MASK;
+
+                GPIOx->PUPD &= ~GPIO_PUPD_PUPD4_MASK;
+                GPIOx->PUPD  |=  GPIO_PUPD_PUPD4_1;
+
+                GPIOx->AFL  &= ~GPIO_AFL_AFSEL4;
+            }
+            else if ((GPIOA == GPIOx) && (currentpin == GPIO_PIN_5))
+            {
+                /* PA5 = SWDIO: Input mode, Pull-Up, AF0 */
+                GPIOx->PMODE &= ~GPIO_PMODE_PMODE5_MASK;
+
+                GPIOx->PUPD &= ~GPIO_PUPD_PUPD5_MASK;
+                GPIOx->PUPD  |=  GPIO_PUPD_PUPD5_0;
+
+                GPIOx->AFL  &= ~GPIO_AFL_AFSEL5;
+            }
+            else
+            {
+                /* Default: Analog mode (PMODE=11), No Pull, AF0 */
+                GPIOx->PMODE |= (GPIO_PMODE_PMODE0_MASK << (pos * 2U));
+
+                GPIOx->PUPD &= ~(GPIO_PUPD_PUPD0_MASK << (pos * 2U));
+
+                if ((pos & (uint8_t)0x08U) != 0U)
+                {
+                    GPIOx->AFH &= ~(GPIO_AFL_AFSEL0 << ((pos & 0x07U) * 4U));
+                }
+                else
+                {
+                    GPIOx->AFL &= ~(GPIO_AFL_AFSEL0 << ((pos & 0x07U) * 4U));
+                }
+            }
+
+            /* Configure the default value IO Output Type: Push-Pull (0) */
+            GPIOx->POTYPE &= ~(GPIO_POTYPE_POT0 << pos);
+
+            /* Configure the default value IO Output: 0 */
+            GPIOx->POD &= ~(GPIO_POD_POD0 << pos);
+
+            /* Configure the default DS in current IO: 4mA */
+            GPIOx->DS &= ~(GPIO_DS_DS0_MASK << (pos * 2U));
+            GPIOx->DS |= (GPIO_DS_4MA << (pos * 2U));
+
+            /*------------------------- EXTI Mode Configuration --------------------*/
+            /* Clear the External Interrupt or Event for the current IO.
+             * WB033: AFIO_EXTI_CFG1 handles lines 0-7, AFIO_EXTI_CFG2 handles lines 8-15.
+             * Each EXTI field is 2-bit with reserved bits between.
+             * Field position within register: sub = pos & 0x07; shift = (sub & 0x03) * 4 + ((sub >> 2) & 0x01) * 16
+             */
+            {
+                uint8_t sub;
+                uint32_t exti_field_pos;
+
+                sub = (uint8_t)(pos & 0x07U);
+                exti_field_pos = (uint32_t)((sub & 0x03U) * 4U) + (uint32_t)(((sub >> 2U) & 0x01U) * 16U);
+
+                if (pos < 8U)
+                {
+                    AFIO->EXTI_CFG1 |= (AFIO_EXTI_CFGMASK << exti_field_pos);
+                }
+                else
+                {
+                    AFIO->EXTI_CFG2 |= (AFIO_EXTI_CFGMASK << exti_field_pos);
+                }
+            }
+
+            /* Clear EXTI line configuration */
+            EXTI->IMASK &= ~((uint32_t)currentpin);
+            EXTI->EMASK &= ~((uint32_t)currentpin);
+
+            /* Clear Rising Falling edge configuration */
+            EXTI->RT_CFG &= ~((uint32_t)currentpin);
+            EXTI->FT_CFG &= ~((uint32_t)currentpin);
+        }
+        pos++;
+    }
+}
+
+
+/**
+ *\*\name   GPIO_InitPeripheral.
+ *\*\fun    Initialize the GPIOx peripheral with the value of the GPIO_InitStruct structure.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  GPIO_InitParam :
+ *\*\            - pin
+ *\*\               - GPIO_PIN_0
+ *\*\               - GPIO_PIN_1
+ *\*\               - GPIO_PIN_2
+ *\*\               - GPIO_PIN_3
+ *\*\               - GPIO_PIN_4
+ *\*\               - GPIO_PIN_5
+ *\*\               - GPIO_PIN_6
+ *\*\               - GPIO_PIN_7
+ *\*\               - GPIO_PIN_8
+ *\*\               - GPIO_PIN_9
+ *\*\               - GPIO_PIN_10
+ *\*\               - GPIO_PIN_11
+ *\*\               - GPIO_PIN_12
+ *\*\               - GPIO_PIN_13
+ *\*\               - GPIO_PIN_14
+ *\*\               - GPIO_PIN_15
+ *\*\               - GPIO_PIN_ALL
+ *\*\            - GPIO_Mode
+ *\*\               - GPIO_MODE_INPUT
+ *\*\               - GPIO_MODE_OUTPUT_PP
+ *\*\               - GPIO_MODE_OUTPUT_OD
+ *\*\               - GPIO_MODE_AF_PP
+ *\*\               - GPIO_MODE_AF_OD
+ *\*\               - GPIO_MODE_ANALOG
+ *\*\            - GPIO_Pull
+ *\*\               - GPIO_NO_PULL
+ *\*\               - GPIO_PULL_UP
+ *\*\               - GPIO_PULL_DOWN
+ *\*\            - GPIO_Current
+ *\*\               - GPIO_DS_2MA
+ *\*\               - GPIO_DS_4MA
+ *\*\               - GPIO_DS_8MA
+ *\*\               - GPIO_DS_12MA
+ *\*\            - GPIO_Alternate
+ *\*\               - GPIO_AF0
+ *\*\               - GPIO_AF1
+ *\*\               - GPIO_AF2
+ *\*\               - GPIO_AF3
+ *\*\               - GPIO_AF4
+ *\*\               - GPIO_AF5
+ *\*\               - GPIO_AF6
+ *\*\               - GPIO_AF7
+ *\*\               - GPIO_AF8
+ *\*\               - GPIO_AF9
+ *\*\               - GPIO_AF10
+ *\*\               - GPIO_AF11
+ *\*\               - GPIO_AF12
+ *\*\               - GPIO_AF13
+ *\*\               - GPIO_AF14
+ *\*\               - GPIO_NO_AF            NO alternate Function mapping
+ *\*\return none
+ */
+void GPIO_InitPeripheral(GPIO_Module* GPIOx, const GPIO_InitType* GPIO_InitParam)
+{
+    uint32_t pos = 0x00U, currentpin;
+    uint32_t tmpregister;
+
+    while (((GPIO_InitParam->Pin) >> pos) != 0U)
+    {
+        currentpin = (GPIO_InitParam->Pin) & ((uint32_t)1U << pos);
+
+        if (currentpin > 0U)
+        {
+            /*--------------------- GPIO Mode Configuration ------------------------*/
+            /* In case of Alternate function, Analog, or Input mode selection */
+            if ((GPIO_InitParam->GPIO_Mode == GPIO_MODE_AF_PP) || (GPIO_InitParam->GPIO_Mode == GPIO_MODE_AF_OD)
+                || (GPIO_InitParam->GPIO_Mode == GPIO_MODE_ANALOG) || (GPIO_InitParam->GPIO_Mode == GPIO_MODE_INPUT))
+            {
+                /* Configure Alternate function mapped with the current IO */
+                if ((pos & (uint8_t)0x08U) > 0U)
+                {
+                    tmpregister = GPIOx->AFH;
+                    tmpregister &= ~((uint32_t)0xFU << ((uint32_t)(pos & (uint32_t)0x07U) * 4U));
+                    tmpregister |= ((uint32_t)(GPIO_InitParam->GPIO_Alternate) << ((uint32_t)(pos & (uint32_t)0x07U) * 4U));
+                    GPIOx->AFH = tmpregister;
+                }
+                else
+                {
+                    tmpregister = GPIOx->AFL;
+                    tmpregister &= ~((uint32_t)0xFU << ((uint32_t)(pos & (uint32_t)0x07U) * 4U));
+                    tmpregister |= ((uint32_t)(GPIO_InitParam->GPIO_Alternate) << ((uint32_t)(pos & (uint32_t)0x07U) * 4U));
+                    GPIOx->AFL = tmpregister;
+                }
+            }
+
+            /* In case of Output or Alternate function mode selection */
+            if ((GPIO_InitParam->GPIO_Mode == GPIO_MODE_OUTPUT_PP) || (GPIO_InitParam->GPIO_Mode == GPIO_MODE_OUTPUT_OD)
+                 || (GPIO_InitParam->GPIO_Mode == GPIO_MODE_AF_PP) || (GPIO_InitParam->GPIO_Mode == GPIO_MODE_AF_OD))
+            {
+                /* Configure the IO Output Type */
+                tmpregister = GPIOx->POTYPE;
+                tmpregister &= ~(GPIO_POTYPE_POT0 << pos);
+                tmpregister |= (((GPIO_InitParam->GPIO_Mode >> 4U) & 0x01U) << pos);
+                GPIOx->POTYPE = tmpregister;
+            }
+
+            /*---------------------------- GPIO Mode Configuration -----------------------*/
+            /* Configure IO Direction mode (Input, Output, Alternate or Analog) */
+            tmpregister = GPIOx->PMODE;
+            tmpregister &= ~(GPIO_PMODE_PMODE0_MASK << (pos * 2U));
+            tmpregister |= (((GPIO_InitParam->GPIO_Mode & 0x03U) << (pos * 2U)));
+            GPIOx->PMODE = tmpregister;
+
+            /* Configure pull-down mode */
+            tmpregister = GPIOx->PUPD;
+            tmpregister &= ~(GPIO_PUPD_PUPD0_MASK << (pos * 2U));
+            tmpregister |= (GPIO_InitParam->GPIO_Pull << (pos * 2U));
+            GPIOx->PUPD = tmpregister;
+
+            /* Configure driver current (2-bit encoding: 00=2mA, 01=4mA, 10=8mA, 11=12mA) */
+            tmpregister = GPIOx->DS;
+            tmpregister &= ~(GPIO_DS_DS0_MASK << (pos * 2U));
+            tmpregister |= (GPIO_InitParam->GPIO_Current << (pos * 2U));
+            GPIOx->DS = tmpregister;
+        }
+        pos++;
+    }
+}
+
+
+/**
+ *\*\name   GPIO_InitStruct.
+ *\*\fun    Assign default values to each GPIO_InitType member.
+ *\*\param  GPIO_InitParam :
+ *\*\           pointer to GPIO_InitType structure.
+ *\*\return none
+ */
+void GPIO_InitStruct(GPIO_InitType* GPIO_InitParam)
+{
+    /* Reset GPIO init structure parameters values */
+    GPIO_InitParam->Pin            = GPIO_PIN_ALL;
+    GPIO_InitParam->GPIO_Alternate = GPIO_NO_AF;
+    GPIO_InitParam->GPIO_Mode      = GPIO_MODE_INPUT;
+    GPIO_InitParam->GPIO_Pull      = GPIO_NO_PULL;
+    GPIO_InitParam->GPIO_Current   = GPIO_DS_4MA;
+}
+
+
+/**
+ *\*\name   GPIO_ReadInputDataBit.
+ *\*\fun    Get the pin status on the specified input port.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  Pin :
+ *\*\          - GPIO_PIN_0
+ *\*\          - GPIO_PIN_1
+ *\*\          - GPIO_PIN_2
+ *\*\          - GPIO_PIN_3
+ *\*\          - GPIO_PIN_4
+ *\*\          - GPIO_PIN_5
+ *\*\          - GPIO_PIN_6
+ *\*\          - GPIO_PIN_7
+ *\*\          - GPIO_PIN_8
+ *\*\          - GPIO_PIN_9
+ *\*\          - GPIO_PIN_10
+ *\*\          - GPIO_PIN_11
+ *\*\          - GPIO_PIN_12
+ *\*\          - GPIO_PIN_13
+ *\*\          - GPIO_PIN_14
+ *\*\          - GPIO_PIN_15
+ *\*\return the pin state on the input port.
+ */
+uint8_t GPIO_ReadInputDataBit(const GPIO_Module* GPIOx, uint16_t Pin)
+{
+    uint8_t bitstatus;
+
+    if ((GPIOx->PID & Pin) != (uint32_t)Bit_RESET)
+    {
+        bitstatus = (uint8_t)Bit_SET;
+    }
+    else
+    {
+        bitstatus = (uint8_t)Bit_RESET;
+    }
+    return bitstatus;
+}
+
+
+/**
+ *\*\name   GPIO_ReadInputData.
+ *\*\fun    Get the input data on the designated GPIO port.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\return the data value on the GPIO input port.
+ */
+uint16_t GPIO_ReadInputData(const GPIO_Module* GPIOx)
+{
+    return ((uint16_t)GPIOx->PID);
+}
+
+/**
+ *\*\name   GPIO_ReadOutputDataBit.
+ *\*\fun    Get the pin status on the specified output port.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  Pin :
+ *\*\          - GPIO_PIN_0
+ *\*\          - GPIO_PIN_1
+ *\*\          - GPIO_PIN_2
+ *\*\          - GPIO_PIN_3
+ *\*\          - GPIO_PIN_4
+ *\*\          - GPIO_PIN_5
+ *\*\          - GPIO_PIN_6
+ *\*\          - GPIO_PIN_7
+ *\*\          - GPIO_PIN_8
+ *\*\          - GPIO_PIN_9
+ *\*\          - GPIO_PIN_10
+ *\*\          - GPIO_PIN_11
+ *\*\          - GPIO_PIN_12
+ *\*\          - GPIO_PIN_13
+ *\*\          - GPIO_PIN_14
+ *\*\          - GPIO_PIN_15
+ *\*\return the pin state on the output port.
+ */
+uint8_t GPIO_ReadOutputDataBit(const GPIO_Module* GPIOx, uint16_t Pin)
+{
+    uint8_t bitstatus;
+
+    if ((GPIOx->POD & Pin) != (uint32_t)Bit_RESET)
+    {
+        bitstatus = (uint8_t)Bit_SET;
+    }
+    else
+    {
+        bitstatus = (uint8_t)Bit_RESET;
+    }
+    return bitstatus;
+}
+
+/**
+ *\*\name   GPIO_ReadOutputData.
+ *\*\fun    Get the output data on the designated GPIO port.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\return the data value on the GPIO output port.
+ */
+uint16_t GPIO_ReadOutputData(const GPIO_Module* GPIOx)
+{
+    return ((uint16_t)GPIOx->POD);
+}
+
+/**
+ *\*\name   GPIO_SetBits.
+ *\*\fun    Sets the selected data port bits.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  Pin :
+ *\*\          - GPIO_PIN_0
+ *\*\          - GPIO_PIN_1
+ *\*\          - GPIO_PIN_2
+ *\*\          - GPIO_PIN_3
+ *\*\          - GPIO_PIN_4
+ *\*\          - GPIO_PIN_5
+ *\*\          - GPIO_PIN_6
+ *\*\          - GPIO_PIN_7
+ *\*\          - GPIO_PIN_8
+ *\*\          - GPIO_PIN_9
+ *\*\          - GPIO_PIN_10
+ *\*\          - GPIO_PIN_11
+ *\*\          - GPIO_PIN_12
+ *\*\          - GPIO_PIN_13
+ *\*\          - GPIO_PIN_14
+ *\*\          - GPIO_PIN_15
+ *\*\return none
+ */
+void GPIO_SetBits(GPIO_Module* GPIOx, uint16_t Pin)
+{
+    GPIOx->PBSC = Pin;
+}
+
+
+/**
+ *\*\name   GPIO_WritePBSC.
+ *\*\fun    Set or Reset the selected data port bits using PBSC.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  Pin :
+ *\*\          - GPIO_PIN_0
+ *\*\          - GPIO_PIN_1
+ *\*\          - GPIO_PIN_2
+ *\*\          - GPIO_PIN_3
+ *\*\          - GPIO_PIN_4
+ *\*\          - GPIO_PIN_5
+ *\*\          - GPIO_PIN_6
+ *\*\          - GPIO_PIN_7
+ *\*\          - GPIO_PIN_8
+ *\*\          - GPIO_PIN_9
+ *\*\          - GPIO_PIN_10
+ *\*\          - GPIO_PIN_11
+ *\*\          - GPIO_PIN_12
+ *\*\          - GPIO_PIN_13
+ *\*\          - GPIO_PIN_14
+ *\*\          - GPIO_PIN_15
+ *\*\param  bitstatus :
+ *\*\             - Bit_SET
+ *\*\             - Bit_RESET
+ *\*\return none
+ */
+void GPIO_WritePBSC(GPIO_Module* GPIOx, uint16_t Pin, uint8_t bitstatus)
+{
+    if (bitstatus == (uint8_t)Bit_SET)
+    {
+        GPIOx->PBSC = (uint32_t)Pin;
+    }
+    else
+    {
+        GPIOx->PBSC = (((uint32_t)Pin) << 16U);
+    }
+}
+
+
+/**
+ *\*\name   GPIO_ResetBits.
+ *\*\fun    Reset the selected data port bits.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  Pin :
+ *\*\          - GPIO_PIN_0
+ *\*\          - GPIO_PIN_1
+ *\*\          - GPIO_PIN_2
+ *\*\          - GPIO_PIN_3
+ *\*\          - GPIO_PIN_4
+ *\*\          - GPIO_PIN_5
+ *\*\          - GPIO_PIN_6
+ *\*\          - GPIO_PIN_7
+ *\*\          - GPIO_PIN_8
+ *\*\          - GPIO_PIN_9
+ *\*\          - GPIO_PIN_10
+ *\*\          - GPIO_PIN_11
+ *\*\          - GPIO_PIN_12
+ *\*\          - GPIO_PIN_13
+ *\*\          - GPIO_PIN_14
+ *\*\          - GPIO_PIN_15
+ *\*\return none
+ */
+void GPIO_ResetBits(GPIO_Module* GPIOx, uint16_t Pin)
+{
+    GPIOx->PBC = Pin;
+}
+
+/**
+ *\*\name   GPIO_WriteBit.
+ *\*\fun    Set or Reset the selected data port bits.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  Pin :
+ *\*\          - GPIO_PIN_0
+ *\*\          - GPIO_PIN_1
+ *\*\          - GPIO_PIN_2
+ *\*\          - GPIO_PIN_3
+ *\*\          - GPIO_PIN_4
+ *\*\          - GPIO_PIN_5
+ *\*\          - GPIO_PIN_6
+ *\*\          - GPIO_PIN_7
+ *\*\          - GPIO_PIN_8
+ *\*\          - GPIO_PIN_9
+ *\*\          - GPIO_PIN_10
+ *\*\          - GPIO_PIN_11
+ *\*\          - GPIO_PIN_12
+ *\*\          - GPIO_PIN_13
+ *\*\          - GPIO_PIN_14
+ *\*\          - GPIO_PIN_15
+ *\*\param  BitCmd :
+ *\*\          - Bit_RESET
+ *\*\          - Bit_SET
+ *\*\return none
+ */
+void GPIO_WriteBit(GPIO_Module* GPIOx, uint16_t Pin, Bit_OperateType BitCmd)
+{
+    if (BitCmd != Bit_RESET)
+    {
+        GPIOx->PBSC = Pin;
+    }
+    else
+    {
+        GPIOx->PBC = Pin;
+    }
+}
+
+/**
+ *\*\name   GPIO_Write.
+ *\*\fun    Write data on the designated GPIO data port.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  data_value :
+ *\*\          the value to be written to the port output data register.
+ *\*\          - 0~0xFFFF
+ *\*\return none
+ */
+void GPIO_Write(GPIO_Module* GPIOx, uint16_t data_value)
+{
+    GPIOx->POD = data_value;
+}
+
+/**
+ *\*\name   GPIO_TogglePin.
+ *\*\fun    Toggle the specified port pin level.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  Pin :
+ *\*\          - GPIO_PIN_0
+ *\*\          - GPIO_PIN_1
+ *\*\          - GPIO_PIN_2
+ *\*\          - GPIO_PIN_3
+ *\*\          - GPIO_PIN_4
+ *\*\          - GPIO_PIN_5
+ *\*\          - GPIO_PIN_6
+ *\*\          - GPIO_PIN_7
+ *\*\          - GPIO_PIN_8
+ *\*\          - GPIO_PIN_9
+ *\*\          - GPIO_PIN_10
+ *\*\          - GPIO_PIN_11
+ *\*\          - GPIO_PIN_12
+ *\*\          - GPIO_PIN_13
+ *\*\          - GPIO_PIN_14
+ *\*\          - GPIO_PIN_15
+ *\*\return none
+ */
+void GPIO_TogglePin(GPIO_Module *GPIOx, uint16_t Pin)
+{
+    GPIOx->POD ^= Pin;
+}
+
+/**
+ *\*\name   GPIO_ConfigPinLock.
+ *\*\fun    GPIO port lock register configuration.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  Pin :
+ *\*\          - GPIO_PIN_0
+ *\*\          - GPIO_PIN_1
+ *\*\          - GPIO_PIN_2
+ *\*\          - GPIO_PIN_3
+ *\*\          - GPIO_PIN_4
+ *\*\          - GPIO_PIN_5
+ *\*\          - GPIO_PIN_6
+ *\*\          - GPIO_PIN_7
+ *\*\          - GPIO_PIN_8
+ *\*\          - GPIO_PIN_9
+ *\*\          - GPIO_PIN_10
+ *\*\          - GPIO_PIN_11
+ *\*\          - GPIO_PIN_12
+ *\*\          - GPIO_PIN_13
+ *\*\          - GPIO_PIN_14
+ *\*\          - GPIO_PIN_15
+ *\*\return none
+ */
+void GPIO_ConfigPinLock(GPIO_Module* GPIOx, uint16_t Pin)
+{
+    uint32_t tmp = GPIO_PLOCK_PLOCKK;
+
+    tmp |= Pin;
+    /* Set PLOCKK bit */
+    GPIOx->PLOCK = tmp;
+    /* Reset PLOCKK bit */
+    GPIOx->PLOCK = Pin;
+    /* Set PLOCKK bit */
+    GPIOx->PLOCK = tmp;
+    /* Read PLOCKK bit */
+    GPIOx->PLOCK;
+    /* Read PLOCKK bit */
+    GPIOx->PLOCK;
+}
+
+
+
+/**
+ *\*\name   GPIO_ConfigPinRemap.
+ *\*\fun    Pin remapping configuration.
+ *\*\param  PortSource :
+ *\*\          - GPIOA_PORT_SOURCE
+ *\*\          - GPIOB_PORT_SOURCE
+ *\*\          - GPIOC_PORT_SOURCE
+ *\*\param  PinSource :
+ *\*\          - GPIO_PIN_SOURCE0
+ *\*\          - GPIO_PIN_SOURCE1
+ *\*\          - GPIO_PIN_SOURCE2
+ *\*\          - GPIO_PIN_SOURCE3
+ *\*\          - GPIO_PIN_SOURCE4
+ *\*\          - GPIO_PIN_SOURCE5
+ *\*\          - GPIO_PIN_SOURCE6
+ *\*\          - GPIO_PIN_SOURCE7
+ *\*\          - GPIO_PIN_SOURCE8
+ *\*\          - GPIO_PIN_SOURCE9
+ *\*\          - GPIO_PIN_SOURCE10
+ *\*\          - GPIO_PIN_SOURCE11
+ *\*\          - GPIO_PIN_SOURCE12
+ *\*\          - GPIO_PIN_SOURCE13
+ *\*\          - GPIO_PIN_SOURCE14
+ *\*\          - GPIO_PIN_SOURCE15
+ *\*\param  AlternateFunction :
+ *\*\          - GPIO_AF0
+ *\*\          - GPIO_AF1
+ *\*\          - GPIO_AF2
+ *\*\          - GPIO_AF3
+ *\*\          - GPIO_AF4
+ *\*\          - GPIO_AF5
+ *\*\          - GPIO_AF6
+ *\*\          - GPIO_AF7
+ *\*\          - GPIO_AF8
+ *\*\          - GPIO_AF9
+ *\*\          - GPIO_AF10
+ *\*\          - GPIO_AF11
+ *\*\          - GPIO_AF12
+ *\*\          - GPIO_AF13
+ *\*\          - GPIO_AF14
+ *\*\          - GPIO_NO_AF            NO alternate Function mapping
+ *\*\return none
+ */
+void GPIO_ConfigPinRemap(uint8_t PortSource, uint32_t PinSource, uint32_t AlternateFunction)
+{
+    uint8_t temp_value, pin_source;
+    uint32_t tmpregister;
+    GPIO_Module *GPIOx;
+
+    pin_source = (uint8_t)(PinSource & 0x0000000FU);
+
+    GPIOx = GPIO_GET_PERIPH(PortSource);
+
+    if ((pin_source & (uint8_t)0x08U) != 0U)
+    {
+        temp_value = (pin_source & (uint8_t)0x07U);
+        tmpregister = GPIOx->AFH;
+        tmpregister &= ~((uint32_t)0x0FU << (temp_value * 4U));
+        tmpregister |= ((uint32_t)(AlternateFunction) << (temp_value * 4U));
+        GPIOx->AFH = tmpregister;
+    }
+    else
+    {
+        temp_value = (pin_source & (uint8_t)0x07U);
+        tmpregister = GPIOx->AFL;
+        tmpregister &= ~((uint32_t)0x0FU << (temp_value * 4U));
+        tmpregister |= ((uint32_t)(AlternateFunction) << (temp_value * 4U));
+        GPIOx->AFL = tmpregister;
+    }
+}
+
+
+/**
+ *\*\name   AFIO_ConfigSPINSSMode.
+ *\*\fun    Selects the alternate function SPIx NSS mode.
+ *\*\param  AFIO_SPIx_NSS :
+ *\*\          choose which SPI configuration.
+ *\*\          - AFIO_SPI1_NSS
+ *\*\          - AFIO_SPI2_NSS
+ *\*\          - AFIO_SPI3_NSS
+ *\*\param  SpiNssMode :
+ *\*\          specifies the SPI_NSS mode to be configured.
+ *\*\          - AFIO_SPI_NSS_HIGH_IMPEDANCE
+ *\*\          - AFIO_SPI_NSS_High_LEVEL
+ *\*\return none
+ */
+void AFIO_ConfigSPINSSMode(uint32_t AFIO_SPIx_NSS, uint32_t SpiNssMode)
+{
+    uint32_t tmpregister;
+
+    tmpregister = AFIO->CFG;
+
+    if (SpiNssMode != AFIO_SPI_NSS_HIGH_IMPEDANCE)
+    {
+        tmpregister |= AFIO_SPIx_NSS;
+    }
+    else
+    {
+        tmpregister &= ~AFIO_SPIx_NSS;
+    }
+
+    AFIO->CFG = tmpregister;
+}
+
+
+/**
+ *\*\name   ConfigEXTIFlitEN.
+ *\*\fun    Configure EXTI filter enable.
+ *\*\param  Cmd :
+ *\*\          - ENABLE
+ *\*\          - DISABLE
+ *\*\return none
+ */
+void AFIO_ConfigEXTIFlitEN(FunctionalState Cmd)
+{
+    uint32_t tmpregister;
+
+    tmpregister = AFIO->CFG;
+
+    if (Cmd != DISABLE)
+    {
+        tmpregister &= ~AFIO_CFG_EXTIFLITDIS;
+    }
+    else
+    {
+        tmpregister |= AFIO_CFG_EXTIFLITDIS;
+    }
+
+    AFIO->CFG = tmpregister;
+}
+
+
+/**
+ *\*\name   AFIO_ConfigIOFlitNum.
+ *\*\fun    Configure IO filter number in APB clock.
+ *\*\param  filter_clk
+ *\*\          - GPIO_FILTER_BYPASS
+ *\*\          - GPIO_FILTER_1_CLK
+ *\*\          - GPIO_FILTER_2_CLK
+ *\*\          - GPIO_FILTER_3_CLK
+ *\*\return none
+ */
+void AFIO_ConfigIOFlitNum(uint32_t filter_clk)
+{
+    uint32_t tmpregister;
+
+    tmpregister = AFIO->CFG;
+    tmpregister &= ~AFIO_CFG_IOFILTCFG_MASK;
+    tmpregister |= filter_clk;
+
+    AFIO->CFG = tmpregister;
+}
+
+
+/**
+ *\*\name   AFIO_ConfigADCInjectedTrigger.
+ *\*\fun    Configure ADC injected conversion external trigger source and remapping.
+ *\*\param  TriggerSource :
+ *\*\          - AFIO_ADC_TRIGGER_EXTI : ADC injected trigger connected to EXTI(0-15)
+ *\*\          - AFIO_ADC_TRIGGER_TIM  : ADC injected trigger connected to GTIM1_TRGO
+ *\*\param  EXTI_Line :
+ *\*\          - GPIO_EXTILINE_SOURCE0
+ *\*\          - GPIO_EXTILINE_SOURCE1
+ *\*\          - GPIO_EXTILINE_SOURCE2
+ *\*\          - GPIO_EXTILINE_SOURCE3
+ *\*\          - GPIO_EXTILINE_SOURCE4
+ *\*\          - GPIO_EXTILINE_SOURCE5
+ *\*\          - GPIO_EXTILINE_SOURCE6
+ *\*\          - GPIO_EXTILINE_SOURCE7
+ *\*\          - GPIO_EXTILINE_SOURCE8
+ *\*\          - GPIO_EXTILINE_SOURCE9
+ *\*\          - GPIO_EXTILINE_SOURCE10
+ *\*\          - GPIO_EXTILINE_SOURCE11
+ *\*\          - GPIO_EXTILINE_SOURCE12
+ *\*\          - GPIO_EXTILINE_SOURCE13
+ *\*\          - GPIO_EXTILINE_SOURCE14
+ *\*\          - GPIO_EXTILINE_SOURCE15
+ *\*\return none
+ */
+void AFIO_ConfigADCInjectedTrigger(uint32_t TriggerSource, uint8_t EXTI_Line)
+{
+    uint32_t tmpregister;
+
+    tmpregister = AFIO->CFG;
+
+    /* Configure EXTI line selection for ADC injected trigger */
+    tmpregister &= ~AFIO_CFG_EXTI_ETRI_MASK;
+    tmpregister |= ((uint32_t)EXTI_Line << 4U);
+
+    /* Configure ADC injected trigger remapping */
+    if (TriggerSource != AFIO_ADC_TRIGGER_EXTI)
+    {
+        tmpregister |= AFIO_CFG_ADC_ETRI;
+    }
+    else
+    {
+        tmpregister &= ~AFIO_CFG_ADC_ETRI;
+    }
+
+    AFIO->CFG = tmpregister;
+}
+
+
+/**
+ *\*\name   AFIO_ConfigADCRegularTrigger.
+ *\*\fun    Configure ADC regular conversion external trigger source and remapping.
+ *\*\param  TriggerSource :
+ *\*\          - AFIO_ADC_TRIGGER_EXTI : ADC regular trigger connected to EXTI(0-15)
+ *\*\          - AFIO_ADC_TRIGGER_TIM  : ADC regular trigger connected to ATIM1_TRGO
+ *\*\param  EXTI_Line :
+ *\*\          - GPIO_EXTILINE_SOURCE0
+ *\*\          - GPIO_EXTILINE_SOURCE1
+ *\*\          - GPIO_EXTILINE_SOURCE2
+ *\*\          - GPIO_EXTILINE_SOURCE3
+ *\*\          - GPIO_EXTILINE_SOURCE4
+ *\*\          - GPIO_EXTILINE_SOURCE5
+ *\*\          - GPIO_EXTILINE_SOURCE6
+ *\*\          - GPIO_EXTILINE_SOURCE7
+ *\*\          - GPIO_EXTILINE_SOURCE8
+ *\*\          - GPIO_EXTILINE_SOURCE9
+ *\*\          - GPIO_EXTILINE_SOURCE10
+ *\*\          - GPIO_EXTILINE_SOURCE11
+ *\*\          - GPIO_EXTILINE_SOURCE12
+ *\*\          - GPIO_EXTILINE_SOURCE13
+ *\*\          - GPIO_EXTILINE_SOURCE14
+ *\*\          - GPIO_EXTILINE_SOURCE15
+ *\*\return none
+ */
+void AFIO_ConfigADCRegularTrigger(uint32_t TriggerSource, uint8_t EXTI_Line)
+{
+    uint32_t tmpregister;
+
+    tmpregister = AFIO->CFG;
+
+    /* Configure EXTI line selection for ADC regular trigger */
+    tmpregister &= ~AFIO_CFG_EXTI_ETRR_MASK;
+    tmpregister |= ((uint32_t)EXTI_Line);
+
+    /* Configure ADC regular trigger remapping */
+    if (TriggerSource != AFIO_ADC_TRIGGER_EXTI)
+    {
+        tmpregister |= AFIO_CFG_ADC_ETRR;
+    }
+    else
+    {
+        tmpregister &= ~AFIO_CFG_ADC_ETRR;
+    }
+
+    AFIO->CFG = tmpregister;
+}
+
+
+/**
+ *\*\name   AFIO_DIGEFTEnable.
+ *\*\fun    Enables or disable digital EFT of port pins.
+ *\*\param  GPIOx :
+ *\*\          - GPIOA
+ *\*\          - GPIOB
+ *\*\          - GPIOC
+ *\*\param  Pin :
+ *\*\          - GPIO_PIN_0
+ *\*\          - GPIO_PIN_1
+ *\*\          - GPIO_PIN_2
+ *\*\          - GPIO_PIN_3
+ *\*\          - GPIO_PIN_4
+ *\*\          - GPIO_PIN_5
+ *\*\          - GPIO_PIN_6
+ *\*\          - GPIO_PIN_7
+ *\*\          - GPIO_PIN_8
+ *\*\          - GPIO_PIN_9
+ *\*\          - GPIO_PIN_10
+ *\*\          - GPIO_PIN_11
+ *\*\          - GPIO_PIN_12
+ *\*\          - GPIO_PIN_13
+ *\*\          - GPIO_PIN_14
+ *\*\          - GPIO_PIN_15
+ *\*\          - GPIO_PIN_ALL
+ *\*\param  Cmd :
+ *\*\          - ENABLE
+ *\*\          - DISABLE
+ *\*\return none
+ */
+void AFIO_DIGEFTEnable(const GPIO_Module* GPIOx, uint32_t Pin, FunctionalState Cmd)
+{
+    uint32_t GPIO_Index = GPIO_GET_INDEX(GPIOx);
+    uint32_t tmpregister, pos, pin_msk;
+
+    if (GPIO_Index == 0U)
+    {
+        pin_msk = Pin & GPIOA_DIGEFT_PINS;
+        tmpregister  = AFIO->DIGEFT_CFG1;
+        AFIO->DIGEFT_CFG1 = (Cmd != DISABLE) ? (tmpregister | pin_msk)
+                                             : (tmpregister & ~pin_msk);
+    }
+    else if (GPIO_Index == 1U)
+    {
+        static const uint32_t map[16] = {
+            0,                                 /* [0]  unused */
+            AFIO_DIGEFT_CFG2_DIGEFTEN0,        /* [1] */
+            AFIO_DIGEFT_CFG2_DIGEFTEN1,        /* [2] */
+            0,                                 /* [3]  unused */
+            AFIO_DIGEFT_CFG2_DIGEFTEN2,        /* [4] */
+            AFIO_DIGEFT_CFG2_DIGEFTEN3,        /* [5] */
+            0, 0, 0, 0, 0,                     /* [6] - [10] unused */
+            AFIO_DIGEFT_CFG2_DIGEFTEN4,        /* [11] */
+            AFIO_DIGEFT_CFG2_DIGEFTEN5,        /* [12] */
+            0, 0, 0                            /* [13] - [15] unused */
+        };
+
+        pin_msk = Pin & GPIOB_DIGEFT_PINS;
+        tmpregister = AFIO->DIGEFT_CFG2;
+        pos = 0x00U;
+
+        while ((pin_msk >> pos) != 0U)
+        {
+            uint32_t currentpin = (pin_msk) & ((uint32_t)1U << pos);
+
+            if (currentpin != 0U)
+            {
+                uint32_t m = map[pos];
+                tmpregister = (Cmd != DISABLE) ? (tmpregister | m)
+                                               : (tmpregister & ~m);
+            }
+            pos++;
+        }
+
+        AFIO->DIGEFT_CFG2 = tmpregister;
+    }
+    else if (GPIO_Index == 2U)
+    {
+        pin_msk = Pin & GPIOC_DIGEFT_PINS;
+        tmpregister  = AFIO->DIGEFT_CFG3;
+        AFIO->DIGEFT_CFG3 = (Cmd != DISABLE) ? (tmpregister | (pin_msk >> 11U))
+                                             : (tmpregister & ~(pin_msk >> 11U));
+    }
+    else
+    {
+        /* No Process */
+    }
+}
+
+/**
+ *\*\name   GPIO_ConfigEXTILine.
+ *\*\fun    Selects the GPIO pin used as EXTI Line. A single EXTI line can only be configured with a single pin.
+ *\*\param  PortSource :
+ *\*\          - GPIOA_PORT_SOURCE
+ *\*\          - GPIOB_PORT_SOURCE
+ *\*\          - GPIOC_PORT_SOURCE
+ *\*\param  PinSource :
+ *\*\          - GPIO_PIN_SOURCE0
+ *\*\          - GPIO_PIN_SOURCE1
+ *\*\          - GPIO_PIN_SOURCE2
+ *\*\          - GPIO_PIN_SOURCE3
+ *\*\          - GPIO_PIN_SOURCE4
+ *\*\          - GPIO_PIN_SOURCE5
+ *\*\          - GPIO_PIN_SOURCE6
+ *\*\          - GPIO_PIN_SOURCE7
+ *\*\          - GPIO_PIN_SOURCE8
+ *\*\          - GPIO_PIN_SOURCE9
+ *\*\          - GPIO_PIN_SOURCE10
+ *\*\          - GPIO_PIN_SOURCE11
+ *\*\          - GPIO_PIN_SOURCE12
+ *\*\          - GPIO_PIN_SOURCE13
+ *\*\          - GPIO_PIN_SOURCE14
+ *\*\          - GPIO_PIN_SOURCE15
+ *\*\return none
+ */
+void GPIO_ConfigEXTILine(uint8_t PortSource, uint32_t PinSource)
+{
+    uint8_t line_index, sub_index;
+    uint32_t tmpregister;
+    uint32_t line_position;
+    uint32_t port;
+
+    port       = (uint32_t)PortSource;
+    line_index = (uint8_t)(PinSource & 0x0000000FU);
+    sub_index  = (uint8_t)(line_index & 0x07U);
+
+    /* WB033: 2-bit EXTI encoding.
+     * EXTI_CFG1 handles lines 0-7, EXTI_CFG2 handles lines 8-15.
+     * Field position: (sub % 4) * 4 + (sub / 4) * 16
+     * Mask: 0x03 (2-bit), NOT 0x07 (3-bit) as in G41x.
+     */
+    line_position = (uint32_t)((sub_index & 0x03U) * 4U) + (uint32_t)(((sub_index >> 2U) & 0x01U) * 16U);
+
+    if (line_index < 8U)
+    {
+        tmpregister = AFIO->EXTI_CFG1;
+        tmpregister &= ~(((uint32_t)AFIO_EXTI_CFGMASK) << line_position);
+        tmpregister |= (port << line_position);
+        AFIO->EXTI_CFG1 = tmpregister;
+    }
+    else
+    {
+        tmpregister = AFIO->EXTI_CFG2;
+        tmpregister &= ~(((uint32_t)AFIO_EXTI_CFGMASK) << line_position);
+        tmpregister |= (port << line_position);
+        AFIO->EXTI_CFG2 = tmpregister;
+    }
+}
+
+
+/**
+ *\*\name   GPIO_ClearEXTILine.
+ *\*\fun    Clear the GPIO pin used as EXTI Line.
+ *\*\param  LineSource :
+ *\*\          - GPIO_EXTILINE_SOURCE0
+ *\*\          - GPIO_EXTILINE_SOURCE1
+ *\*\          - GPIO_EXTILINE_SOURCE2
+ *\*\          - GPIO_EXTILINE_SOURCE3
+ *\*\          - GPIO_EXTILINE_SOURCE4
+ *\*\          - GPIO_EXTILINE_SOURCE5
+ *\*\          - GPIO_EXTILINE_SOURCE6
+ *\*\          - GPIO_EXTILINE_SOURCE7
+ *\*\          - GPIO_EXTILINE_SOURCE8
+ *\*\          - GPIO_EXTILINE_SOURCE9
+ *\*\          - GPIO_EXTILINE_SOURCE10
+ *\*\          - GPIO_EXTILINE_SOURCE11
+ *\*\          - GPIO_EXTILINE_SOURCE12
+ *\*\          - GPIO_EXTILINE_SOURCE13
+ *\*\          - GPIO_EXTILINE_SOURCE14
+ *\*\          - GPIO_EXTILINE_SOURCE15
+ *\*\return none
+ */
+void GPIO_ClearEXTILine(uint8_t LineSource)
+{
+    uint8_t sub_index;
+    uint32_t line_position;
+    uint32_t tmpregister;
+
+    sub_index     = (uint8_t)(LineSource & 0x07U);
+    line_position = (uint32_t)((sub_index & 0x03U) * 4U) + (uint32_t)(((sub_index >> 2U) & 0x01U) * 16U);
+
+    if (LineSource < 8U)
+    {
+        tmpregister = AFIO->EXTI_CFG1;
+        tmpregister |= (AFIO_EXTI_CFGMASK << line_position);
+        AFIO->EXTI_CFG1 = tmpregister;
+    }
+    else
+    {
+        tmpregister = AFIO->EXTI_CFG2;
+        tmpregister |= (AFIO_EXTI_CFGMASK << line_position);
+        AFIO->EXTI_CFG2 = tmpregister;
+    }
+}

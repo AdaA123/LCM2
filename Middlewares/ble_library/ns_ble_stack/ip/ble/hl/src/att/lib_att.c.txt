@@ -1,0 +1,117 @@
+#include "gattm_int.h"
+
+uint8_t attm_att_set_permission(uint16_t handle, uint16_t perm, uint16_t ext_perm)
+{
+    struct attm_elmt elmt = ATT_ELEMT_INIT;
+    uint8_t status = attmdb_get_attribute(handle, &elmt);
+
+    if(status == ATT_ERR_NO_ERROR)
+    {
+        if(   attmdb_uuid16_comp(&elmt, ATT_DECL_PRIMARY_SERVICE)
+           || attmdb_uuid16_comp(&elmt, ATT_DECL_SECONDARY_SERVICE)
+           || attmdb_uuid16_comp(&elmt, ATT_DECL_CHARACTERISTIC)
+           || attmdb_uuid16_comp(&elmt, ATT_DECL_INCLUDE)
+           || attmdb_uuid16_comp(&elmt, ATT_DESC_CHAR_EXT_PROPERTIES))
+        {
+            status = ATT_ERR_REQUEST_NOT_SUPPORTED;
+        }
+        else
+        {
+            struct attm_att_desc* att  = elmt.info.att;
+            struct attm_elmt prev_elmt = ATT_ELEMT_INIT;
+
+            // Check if database Hash updated due to characteristic update
+            if(   (attmdb_get_attribute(handle - 1, &prev_elmt) == ATT_ERR_NO_ERROR)
+               && attmdb_uuid16_comp(&prev_elmt, ATT_DECL_CHARACTERISTIC))
+            {
+                if(PERM_GET(att->perm, PROP) != PERM_GET(perm, PROP))
+                {
+                    // Database updated
+                    gattm_db_updated();
+                }
+            }
+
+            /* update attribute permissions */
+            att->perm = perm;
+
+            /* update attribute extended permissions */
+            if(PERM_GET(ext_perm, EKS))
+            {
+                att->info.max_length |= PERM_MASK_EKS;
+            }
+            else
+            {
+                att->info.max_length &= ~PERM_MASK_EKS;
+            }
+        }
+    }
+
+    return (status);
+}
+
+uint8_t attm_reserve_handle_range(uint16_t* start_hdl, uint8_t nb_att)
+{
+    struct gattm_svc_desc svc_desc;
+    uint8_t status;
+
+    // create a fake service description containing handle range to allocate
+    svc_desc.start_hdl = *start_hdl;
+    svc_desc.nb_att    = nb_att - 1;
+
+    // use check service handle to verify if the handle range can be allocated
+    status = attmdb_svc_check_hdl(&svc_desc);
+
+    // update service start handle that should be used for service allocation
+    *start_hdl = svc_desc.start_hdl;
+
+    //return if service range can be allocated or not.
+    return (status);
+}
+
+uint8_t attmdb_svc_visibility_set(uint16_t handle, bool hide)
+{
+    uint8_t status = ATT_ERR_INVALID_HANDLE;
+    bool found = false;
+    struct attm_svc * current_svc = gattm_env.db.svcs;
+
+    /* Browse rest of service list */
+    while((!found)&&(current_svc != NULL))
+    {
+        /* check in following services */
+        if(handle >= current_svc->svc.start_hdl)
+        {
+            /* handle is in current service */
+            if(handle <= current_svc->svc.end_hdl)
+            {
+                found = true;
+            }
+            /* else try in next services*/
+            else
+            {
+                current_svc = current_svc->next;
+            }
+        }
+        /* handle not present in database */
+    }
+
+    if(found)
+    {
+        // check if visibility updated
+        if(PERM_GET(current_svc->svc.ext_perm, EXT_SVC_HIDE) != hide)
+        {
+            // Set service visibility
+            PERM_SET(current_svc->svc.ext_perm, EXT_SVC_HIDE, hide);
+
+            // Mark Database Updated
+            gattm_db_updated();
+        }
+
+        // clean-up cache to ensure that it does not point to current service.
+        gattm_env.db.cache = NULL;
+
+        status = GAP_ERR_NO_ERROR;
+    }
+
+    return status;
+}	
+

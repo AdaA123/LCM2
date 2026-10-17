@@ -1,0 +1,28 @@
+#ifndef SYS_PLATFORM_H
+#define SYS_PLATFORM_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef void (*sys_platform_message_handler_t)(uint16_t message_id, void const *param);
+
+#define SYS_PLATFORM_OK          0
+#define SYS_PLATFORM_ERR_PARAM  (-1)
+#define SYS_PLATFORM_ERR_STATE  (-2)
+
+int  SysPlatform_Initialize(void);
+int  SysPlatform_MessageHandlerSet(sys_platform_message_handler_t handler);
+int  SysPlatform_TimerSet(uint16_t message_id, uint32_t delay_ms);
+int  SysPlatform_TimerClear(uint16_t message_id);
+int  SysPlatform_MessagePost(uint16_t message_id);
+int  SysPlatform_MessageDispatch(uint16_t platform_message_id, void const *param);
+void SysPlatform_Schedule(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SYS_PLATFORM_H */

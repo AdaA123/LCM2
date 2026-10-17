@@ -1,0 +1,1079 @@
+/**
+*     Copyright (c) 2026, Nsing Technologies Inc.
+* 
+*     All rights reserved.
+*
+*     This software is the exclusive property of Nsing Technologies Inc. (Hereinafter 
+* referred to as Nsing). This software, and the product of Nsing described herein 
+* (Hereinafter referred to as the Product) are owned by Nsing under the laws and treaties
+* of the People's Republic of China and other applicable jurisdictions worldwide.
+*
+*     Nsing does not grant any license under its patents, copyrights, trademarks, or other 
+* intellectual property rights. Names and brands of third party may be mentioned or referred 
+* thereto (if any) for identification purposes only.
+*
+*     Nsing reserves the right to make changes, corrections, enhancements, modifications, and 
+* improvements to this software at any time without notice. Please contact Nsing and obtain 
+* the latest version of this software before placing orders.
+
+*     Although Nsing has attempted to provide accurate and reliable information, Nsing assumes 
+* no responsibility for the accuracy and reliability of this software.
+* 
+*     It is the responsibility of the user of this software to properly design, program, and test 
+* the functionality and safety of any application made of this information and any resulting product. 
+* In no event shall Nsing be liable for any direct, indirect, incidental, special,exemplary, or 
+* consequential damages arising in any way out of the use of this software or the Product.
+*
+*     Nsing Products are neither intended nor warranted for usage in systems or equipment, any
+* malfunction or failure of which may cause loss of human life, bodily injury or severe property 
+* damage. Such applications are deemed, "Insecure Usage".
+*
+*     All Insecure Usage shall be made at user's risk. User shall indemnify Nsing and hold Nsing 
+* harmless from and against all claims, costs, damages, and other liabilities, arising from or related 
+* to any customer's Insecure Usage.
+
+*     Any express or implied warranty with regard to this software or the Product, including,but not 
+* limited to, the warranties of merchantability, fitness for a particular purpose and non-infringement
+* are disclaimed to the fullest extent permitted by law.
+
+*     Unless otherwise explicitly permitted by Nsing, anyone may not duplicate, modify, transcribe
+* or otherwise distribute this software for any purposes, in whole or in part.
+*
+*     Nsing products and technologies shall not be used for or incorporated into any products or systems
+* whose manufacture, use, or sale is prohibited under any applicable domestic or foreign laws or regulations. 
+* User shall comply with any applicable export control laws and regulations promulgated and administered by 
+* the governments of any countries asserting jurisdiction over the parties or transactions.
+**/
+
+/**
+*\*\file n32wb033_usart.c
+*\*\author Nsing
+*\*\version v1.0.0
+*\*\copyright Copyright (c) 2026, Nsing Technologies Inc. All rights reserved.
+**/
+
+#include "n32wb033_usart.h"
+#include "n32wb033_rcc.h"
+
+/**
+*\*\name    USART_DeInit
+*\*\fun     Deinitializes the USARTx peripheral registers to their default reset values.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\return  none
+**/
+void USART_DeInit(const USART_Module* USARTx)
+{
+    if (USARTx == USART1)
+    {
+        RCC_EnableAPB2PeriphReset(RCC_APB2_PERIPH_USART1);
+    }
+    else if (USARTx == USART2)
+    {
+        RCC_EnableAPB1PeriphReset(RCC_APB1_PERIPH_USART2);
+    }
+    else
+    {
+        /* no process */
+    }
+}
+
+/**
+*\*\name    USART_Init
+*\*\fun     Initializes the USARTx peripheral according to USART_InitStruct.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_InitStruct (The input parameters must be the following values):
+*\*\          - buad_rate :
+*\*\            - (((buad_rate) > 0) && ((buad_rate) < 0x00989680))
+*\*\          - WordLength
+*\*\            - USART_WL_8B
+*\*\            - USART_WL_9B
+*\*\          - StopBits
+*\*\            - USART_STPB_1
+*\*\            - USART_STPB_0_5
+*\*\            - USART_STPB_2
+*\*\            - USART_STPB_1_5
+*\*\          - Parity
+*\*\            - USART_PE_NO
+*\*\            - USART_PE_EVEN
+*\*\            - USART_PE_ODD
+*\*\          - Mode 
+*\*\            - USART_MODE_RX
+*\*\            - USART_MODE_TX
+*\*\          - HardwareFlowControl 
+*\*\            - USART_HFCTRL_NONE
+*\*\            - USART_HFCTRL_RTS
+*\*\            - USART_HFCTRL_CTS
+*\*\            - USART_HFCTRL_RTS_CTS
+*\*\          - OverSampling 
+*\*\            - USART_8OVER
+*\*\            - USART_16OVER
+*\*\return  none
+**/
+void USART_Init(USART_Module* USARTx, const USART_InitType* USART_InitParam)
+{
+    uint32_t tmpregister;
+    uint32_t apbclock;
+    uint32_t integerdivider;
+    uint32_t fractionaldivider;
+    uint32_t usartxbase;
+    RCC_ClocksType RCC_ClocksStatus;
+
+    usartxbase = (uint32_t)(uintptr_t)USARTx;
+
+    /* USART CTRL2 Configuration */
+    tmpregister = USARTx->CTRL2;
+    /* Clear STOP[1:0] bits */
+    tmpregister &= CTRL2_STPB_CLR_MASK;
+    /* Configure the USART Stop Bits */
+    /* Set STOP[1:0] bits according to StopBits value */
+    tmpregister |= (uint32_t)USART_InitParam->StopBits;
+    /* Write to USART CTRL2 */
+    USARTx->CTRL2 = (uint32_t)tmpregister;
+
+    
+    /* USART CTRL1 Configuration */
+    tmpregister = USARTx->CTRL1;
+    /* Clear RXEN, TXEN, PSEL, PCEN, WL and OSPM bits */
+    tmpregister &= USART_CTRL1_CLR_MASK;
+    /* Configure the USART Word Length, Parity, OverSampling and mode */
+    /* Set the WL bits according to WordLength value */
+    /* Set PSEL and PCEN bits according to Parity value */
+    /* Set RXEN and TXEN bits according to Mode value */
+    /* Set OSPM bits according to OverSampling value */
+    tmpregister |= (uint32_t)USART_InitParam->WordLength | USART_InitParam->Parity \
+                | USART_InitParam->OverSampling | USART_InitParam->Mode;
+    /* Write to USART CTRL1 */
+    USARTx->CTRL1 = (uint32_t)tmpregister;
+
+    /* USART CTRL3 Configuration */
+    tmpregister = USARTx->CTRL3;
+    /* Clear CTSE and RTSE bits */
+    tmpregister &= CTRL3_CLR_MASK;
+    /* Configure the USART HFC */
+    /* Set CTSE and RTSE bits according to HardwareFlowControl value */
+    tmpregister |= USART_InitParam->HardwareFlowControl;
+    /* Write to USART CTRL3 */
+    USARTx->CTRL3 = (uint32_t)tmpregister;
+
+    /* USART BRCF Configuration */
+    /* Configure the USART Baud Rate */
+    RCC_GetClocksFreqValue(&RCC_ClocksStatus);
+    if (usartxbase == USART1_BASE)
+    {
+        apbclock = RCC_ClocksStatus.Pclk2Freq;
+    }
+    else
+    {
+        apbclock = RCC_ClocksStatus.Pclk1Freq;
+    }
+
+    /* Determine the integer part */
+    if ((USARTx->CTRL1 & USART_8OVER) == 0U)
+    {
+        /* Integer part computing in case Oversampling mode is 16 Samples */
+        integerdivider = ((100U * (apbclock / 16U)) / (USART_InitParam->BaudRate));
+    }
+    else
+    {
+        /* Integer part computing in case Oversampling mode is 8 Samples */
+        integerdivider = ((100U * (apbclock / 8U)) / (USART_InitParam->BaudRate));
+    }
+    tmpregister = (integerdivider / 100U) << 4U;
+    /* Determine the fractional part */
+    fractionaldivider = integerdivider - (100U * (tmpregister >> 4U));
+
+    /*Determine whether the fractional part needs to carried*/
+    if ((USARTx->CTRL1 & USART_8OVER) != 0U)
+    {
+        /* Oversampling mode is 8 Samples */
+        fractionaldivider = ((((fractionaldivider * 8U) + 50U) / 100U)) & ((uint8_t)0x0FU);
+        if ((fractionaldivider >> 3U) == 1U)
+        {
+            tmpregister = tmpregister + 0x10U;
+        }
+        else
+        {
+            tmpregister |= fractionaldivider;
+        }
+    }
+    else
+    {
+        /* Oversampling mode is 16 Samples */
+        tmpregister += ((((fractionaldivider * 16U) + 50U) / 100U)) & ((uint8_t)0x1FU);
+    }
+
+    /* Write to USART BRCF */
+    USARTx->BRCF = (uint32_t)tmpregister;
+}
+
+/**
+*\*\name    USART_StructInit.
+*\*\fun     Fills each USART_InitStruct member with its default value.
+*\*\param   USART_InitStruct (The input parameters must be the following values):
+*\*\          - BaudRate
+*\*\          - WordLength
+*\*\          - StopBits
+*\*\          - Parity
+*\*\          - Mode
+*\*\          - OverSampling
+*\*\return  none
+**/
+void USART_StructInit(USART_InitType* USART_InitParam)
+{
+    /* USART_InitParam members default value */
+    USART_InitParam->BaudRate            = 9600U;
+    USART_InitParam->WordLength          = USART_WL_8B;
+    USART_InitParam->StopBits            = USART_STPB_1;
+    USART_InitParam->Parity              = USART_PE_NO;
+    USART_InitParam->Mode                = USART_MODE_RX | USART_MODE_TX;
+    USART_InitParam->HardwareFlowControl = USART_HFCTRL_NONE;
+    USART_InitParam->OverSampling        = USART_16OVER;
+}
+
+
+/**
+*\*\name    USART_ClockInit
+*\*\fun     Initializes the USARTx peripheral Clock according to the specified parameters in the USART_ClockInitParam.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_ClockInitParam (The input parameters must be the following values):
+*\*\          - Clock :
+*\*\            - USART_CLK_DISABLE
+*\*\            - USART_CLK_ENABLE
+*\*\          - USART_Clock_Polarity
+*\*\            - USART_CLKPOL_LOW
+*\*\            - USART_CLKPOL_HIGH
+*\*\          - USART_Clock_Phase
+*\*\            - USART_CLKPHA_1EDGE
+*\*\            - USART_CLKPHA_2EDGE
+*\*\          - USART_Last_Bit
+*\*\            - USART_CLKLB_DISABLE
+*\*\            - USART_CLKLB_ENABLE
+*\*\return  none
+*\*\note    The Smart Card and Synchronous modes are not available for USART5/USART6/USART7/USART8.
+**/
+void USART_ClockInit(USART_Module* USARTx, const USART_ClockInitType* USART_ClockInitParam)
+{
+    uint32_t tmpregister;
+
+    /* USART CTRL2 Configuration */
+    tmpregister = USARTx->CTRL2;
+    /* Clear CLKEN, CPOL, CPHA and LBCLK bits */
+    tmpregister &= CTRL2_CLOCK_CLR_MASK;
+    /* Configure the USART Clock, CPOL, CPHA and LastBit */
+    /* Set CLKEN bit according to Clock value */
+    /* Set CLKPOL bit according to Polarity value */
+    /* Set CLKPHA bit according to Phase value */
+    /* Set LBCLK bit according to LastBit value */
+    tmpregister |= (uint32_t)USART_ClockInitParam->Clock | USART_ClockInitParam->Polarity
+                   | USART_ClockInitParam->Phase | USART_ClockInitParam->LastBit;
+    /* Write to USART CTRL2 */
+    USARTx->CTRL2 = (uint32_t)tmpregister;
+}
+
+/**
+*\*\name    USART_ClockStructInit
+*\*\fun     Fills each USART_ClockInitParam member with its default value.
+*\*\param   USART_ClockInitParam (The input parameters must be the following values):
+*\*\          - Clock
+*\*\          - USART_Clock_Polarity
+*\*\          - USART_Clock_Phase
+*\*\          - USART_Last_Bit
+*\*\return  none
+**/
+void USART_ClockStructInit(USART_ClockInitType* USART_ClockInitParam)
+{
+    /* USART_ClockInitParam members default value */
+    USART_ClockInitParam->Clock    = USART_CLK_DISABLE;
+    USART_ClockInitParam->Polarity = USART_CLKPOL_LOW;
+    USART_ClockInitParam->Phase    = USART_CLKPHA_1EDGE;
+    USART_ClockInitParam->LastBit  = USART_CLKLB_DISABLE;
+}
+
+
+/**
+*\*\name    USART_Enable
+*\*\fun     Enables or disables the specified USART peripheral.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void USART_Enable(USART_Module* USARTx, FunctionalState Cmd)
+{
+   if (Cmd != DISABLE)
+    {
+        /* Enable the selected USART by setting the UE bit in the CTRL1 register */
+        USARTx->CTRL1 |= CTRL1_UEN_SET;
+    }
+    else
+    {
+        /* Disable the selected USART by clearing the UE bit in the CTRL1 register */
+        USARTx->CTRL1 &= CTRL1_UEN_RESET;
+    }
+}
+
+
+/**
+*\*\name    USART_ConfigInt
+*\*\fun     Enables or disables the specified USART interrupts.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_INT (The input parameters must be the following values):
+*\*\          - USART_INT_PEF   Parity Error interrupt
+*\*\          - USART_INT_TXC   Transmission complete interrupt
+*\*\          - USART_INT_TXDE  Transmit Data Register empty interrupt
+*\*\          - USART_INT_RXDNE Receive Data register not empty interrupt
+*\*\          - USART_INT_IDLEF Idle line detection interrupt
+*\*\          - USART_INT_RTOE  Receiver timeout interrupt
+*\*\          - USART_INT_LINBD LIN Break detection interrupt
+*\*\          - USART_INT_ERRF  Error interrupt(Frame error, noise error, overrun error)
+*\*\          - USART_INT_CTSF  CTS change interrupt
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void USART_ConfigInt(const USART_Module* USARTx, uint32_t USART_INT, FunctionalState Cmd)
+{
+    uint32_t itmask;
+    uint32_t usartxbase;
+
+    usartxbase = (uint32_t)(uintptr_t)USARTx;
+
+    /* Get the interrupt position */
+    itmask = USART_INT & USART_INT_MASK;
+
+    if ((USART_INT & USART_CTRL1_INTMASK) != (uint32_t)0x00U) /* The IT is in CTRL1 register */
+    {
+        usartxbase += 0x00U;
+    }
+    else if((USART_INT & USART_CTRL2_INTMASK) != (uint32_t)0x00U) /* The IT is in CTRL2 register */
+    {
+        usartxbase += 0x04U;
+    }
+    else if((USART_INT & USART_CTRL3_INTMASK) != (uint32_t)0x00U) /* The IT is in CTRL3 register */
+    {
+        usartxbase += 0x08U;
+    }
+    else 
+    {
+         /* nothing */
+    }
+
+    if (Cmd != DISABLE)
+	{
+		*((__IO uint32_t*)(uintptr_t)usartxbase) |= itmask;
+	}
+	else
+	{
+		*((__IO uint32_t*)(uintptr_t)usartxbase) &= ~itmask;
+	}
+}
+
+/**
+*\*\name    USART_EnableDMA
+*\*\fun     Enables or disables the USART's DMA interface.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_DMAReq (The input parameters must be the following values):
+*\*\          - USART_DMAREQ_TX       USART DMA transmit request
+*\*\          - USART_DMAREQ_RX       USART DMA receive request
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void USART_EnableDMA(USART_Module* USARTx, uint32_t USART_DMAReq, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable the DMA transfer for selected requests by setting the DMAT and/or
+           DADDR bits in the USART CTRL3 register */
+        USARTx->CTRL3 |= USART_DMAReq;
+    }
+    else
+    {
+        /* Disable the DMA transfer for selected requests by clearing the DMAT and/or
+           DADDR bits in the USART CTRL3 register */
+        USARTx->CTRL3 &= (uint32_t)~USART_DMAReq;
+    }
+}
+
+/**
+*\*\name    USART_SetAddr
+*\*\fun     Sets the address of the USART node.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_Addr (The input parameters must be the following values):
+*\*\          - (((USART_Addr)>=0x00)&&((USART_Addr)<0x10))
+*\*\return  none
+**/
+void USART_SetAddr(USART_Module* USARTx, uint8_t USART_Addr)
+{
+    /* Clear the USART address */
+    USARTx->CTRL2 &= CTRL2_ADDR_MASK;
+    /* Set the USART address node */
+    USARTx->CTRL2 |= USART_Addr;
+}
+
+
+/**
+*\*\name    USART_ConfigWakeUpMode
+*\*\fun     Selects the USART WakeUp method.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_WakeUpMode (The input parameters must be the following values):
+*\*\          - USART_WUM_IDLELINE WakeUp by an idle line detection
+*\*\          - USART_WUM_ADDRMASK WakeUp by an address mark
+*\*\return  none
+**/
+void USART_ConfigWakeUpMode(USART_Module* USARTx, uint32_t USART_WakeUpMode)
+{
+    USARTx->CTRL1 &= CTRL1_WUM_MASK;
+    USARTx->CTRL1 |= USART_WakeUpMode;
+}
+
+
+/**
+*\*\name    USART_EnableRcvWakeUp
+*\*\fun     Determines if the USART is in mute mode or not.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void USART_EnableRcvWakeUp(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable the USART mute mode  by setting the RWU bit in the CTRL1 register */
+        USARTx->CTRL1 |= CTRL1_RCVWU_SET;
+    }
+    else
+    {
+        /* Disable the USART mute mode by clearing the RWU bit in the CTRL1 register */
+        USARTx->CTRL1 &= CTRL1_RCVWU_RESET;
+    }
+}
+
+
+/**
+*\*\name    USART_ConfigLINBreakDetectLength
+*\*\fun     Sets the USART LIN Break detection length.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_LINBreakDetectLength (The input parameters must be the following values):
+*\*\          - USART_LINBDL_10B 10-bit break detection
+*\*\          - USART_LINBDL_11B 11-bit break detection
+*\*\return  none
+**/
+void USART_ConfigLINBreakDetectLength(USART_Module* USARTx, uint32_t USART_LINBreakDetectLength)
+{
+    USARTx->CTRL2 &= CTRL2_LINBDL_MASK;
+    USARTx->CTRL2 |= USART_LINBreakDetectLength;
+}
+
+
+/**
+*\*\name    USART_EnableLIN
+*\*\fun     Enables or disables the USART's LIN mode.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void USART_EnableLIN(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable the LIN mode by setting the LINEN bit in the CTRL2 register */
+        USARTx->CTRL2 |= CTRL2_LINMEN_SET;
+    }
+    else
+    {
+        /* Disable the LIN mode by clearing the LINEN bit in the CTRL2 register */
+        USARTx->CTRL2 &= CTRL2_LINMEN_RESET;
+    }
+}
+
+/**
+*\*\name    USART_SendData
+*\*\fun     Transmits single data through the USARTx peripheral.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   Data :
+*\*\          - the data to transmit
+*\*\return  none
+**/
+void USART_SendData(USART_Module* USARTx, uint32_t Data)
+{
+    /* Transmit Data */
+    USARTx->DAT = (Data & (uint32_t)0x01FFU);
+}
+
+/**
+*\*\name    USART_ReceiveData
+*\*\fun     Returns the most recent received data by the USARTx peripheral.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\return  USARTx->DAT value
+**/
+uint32_t USART_ReceiveData(const USART_Module* USARTx)
+{
+    /* Receive Data */
+    return (uint32_t)(USARTx->DAT & (uint32_t)0x01FFU);
+}
+
+/**
+*\*\name    USART_SendBreak
+*\*\fun     Transmits break characters.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\return  none
+**/
+void USART_SendBreak(USART_Module* USARTx)
+{
+    /* Send break characters */
+    USARTx->CTRL1 |= CTRL1_SDBRK_SET;
+}
+
+
+/**
+*\*\name    USART_SetGuardTime
+*\*\fun     Sets the specifies USART guard time.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_GuardTime:
+*\*\          - specifies the guard time
+*\*\return  none
+**/
+void USART_SetGuardTime(USART_Module* USARTx, uint8_t USART_GuardTime)
+{
+    /* Clear the USART Guard time */
+    USARTx->GTP &= GTP_LSB_MASK;
+    /* Set the USART guard time */
+    USARTx->GTP |= (uint32_t)((uint32_t)USART_GuardTime << 0x08U);
+}
+
+/**
+*\*\name    USART_SetPrescaler
+*\*\fun     Sets the system clock prescaler.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_Prescaler:
+*\*\          - specifies the prescaler clock
+*\*\return  none
+**/
+void USART_SetPrescaler(USART_Module* USARTx, uint8_t USART_Prescaler)
+{
+    /* Clear the USART prescaler */
+    USARTx->GTP &= GTP_MSB_MASK;
+    /* Set the USART prescaler */
+    USARTx->GTP |= USART_Prescaler;
+}
+
+/**
+*\*\name    USART_EnableSmartCard
+*\*\fun     Enables or disables the USART's Smart Card mode.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void USART_EnableSmartCard(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable the SC mode by setting the SCEN bit in the CTRL3 register */
+        USARTx->CTRL3 |= CTRL3_SCMEN_SET;
+    }
+    else
+    {
+        /* Disable the SC mode by clearing the SCEN bit in the CTRL3 register */
+        USARTx->CTRL3 &= CTRL3_SCMEN_RESET;
+    }
+}
+
+/**
+*\*\name    USART_SetSmartCardNACK
+*\*\fun     Enables or disables NACK transmission.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void USART_SetSmartCardNACK(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable the NACK transmission by setting the NACK bit in the CTRL3 register */
+        USARTx->CTRL3 |= CTRL3_SCNACK_SET;
+    }
+    else
+    {
+        /* Disable the NACK transmission by clearing the NACK bit in the CTRL3 register */
+        USARTx->CTRL3 &= CTRL3_SCNACK_RESET;
+    }
+}
+
+
+/**
+*\*\name    USART_EnableHalfDuplex
+*\*\fun     Enables or disables the USART's Half Duplex communication.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void USART_EnableHalfDuplex(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable the Half-Duplex mode by setting the HDSEL bit in the CTRL3 register */
+        USARTx->CTRL3 |= CTRL3_HDMEN_SET;
+    }
+    else
+    {
+        /* Disable the Half-Duplex mode by clearing the HDSEL bit in the CTRL3 register */
+        USARTx->CTRL3 &= CTRL3_HDMEN_RESET;
+    }
+}
+
+
+/**
+*\*\name    USART_ConfigIrDAMode
+*\*\fun     Configures the USART's IrDA interface.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_IrDAMode (The input parameters must be the following values):
+*\*\          - USART_IRDAMODE_LOWPPWER
+*\*\          - USART_IRDAMODE_NORMAL
+*\*\return  none
+**/
+void USART_ConfigIrDAMode(USART_Module* USARTx, uint32_t USART_IrDAMode)
+{
+    USARTx->CTRL3 &= CTRL3_IRDALP_MASK;
+    USARTx->CTRL3 |= USART_IrDAMode;
+}
+
+
+/**
+*\*\name    USART_EnableIrDA
+*\*\fun     Enables or disables the USART's IrDA interface.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   Cmd (The input parameters must be the following values):
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void USART_EnableIrDA(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd != DISABLE)
+    {
+        /* Enable the IrDA mode by setting the IREN bit in the CTRL3 register */
+        USARTx->CTRL3 |= CTRL3_IRDAMEN_SET;
+    }
+    else
+    {
+        /* Disable the IrDA mode by clearing the IREN bit in the CTRL3 register */
+        USARTx->CTRL3 &= CTRL3_IRDAMEN_RESET;
+    }
+}
+
+
+/**
+*\*\name    USART_GetFlagStatus
+*\*\fun     Checks whether the specified USART flag is set or not.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_FLAG (The input   parameters must be the following values):
+*\*\          - USART_FLAG_RTO      recevier timeout Flag
+*\*\          - USART_FLAG_FEF      Framing error Flag
+*\*\          - USART_FLAG_NEF      Noise error flag Flag
+*\*\          - USART_FLAG_OREF     Overrun error
+*\*\          - USART_FLAG_PEF      Parity error
+*\*\          - USART_FLAG_LINBD    LIN break detection flag
+*\*\          - USART_FLAG_CTSF     CTS Change flag
+*\*\          - USART_FLAG_RXDNE    Receive data register not empty flag
+*\*\          - USART_FLAG_TXC      Transmission Complete flag
+*\*\          - USART_FLAG_TXDE     Transmit data register empty flag
+*\*\          - USART_FLAG_IDLEF    Idle Line detection flag
+*\*\return  USART_FLAG
+*\*\          - SET   
+*\*\          - RESET 
+**/
+FlagStatus USART_GetFlagStatus(const USART_Module* USARTx, uint32_t USART_FLAG)
+{
+    FlagStatus bitstatus;
+
+    if ((USARTx->STS & USART_FLAG) != (uint32_t)RESET)
+    {
+        bitstatus = SET;
+    }
+    else
+    {
+        bitstatus = RESET;
+    }
+    return bitstatus;
+}
+
+/**
+*\*\name    USART_ClrFlag
+*\*\fun     Clears the USARTx's pending flags.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_FLAG (The input   parameters must be the following values):
+*\*\          - USART_FLAG_LINBD    LIN break detection flag
+*\*\          - USART_FLAG_CTSF     CTS Change flag
+*\*\          - USART_FLAG_RXDNE    Receive data register not empty flag
+*\*\          - USART_FLAG_TXC      Transmission Complete flag
+*\*\return  none 
+*\*\note
+*\*\          - PE (Parity error), FE (Framing error), NE (Noise error), ORE (OverRun
+*\*\            error) and IDLE (Idle line detected) flags are cleared by software
+*\*\            sequence: a read operation to USART_STS register (USART_GetFlagStatus())
+*\*\            followed by a read operation to USART_DAT register (USART_ReceiveData()).
+*\*\          - RXNE flag can be also cleared by a read to the USART_DAT register
+*\*\            (USART_ReceiveData()).
+*\*\          - TC flag can be also cleared by software sequence: a read operation to
+*\*\            USART_SR register (USART_GetFlagStatus()) followed by a write operation
+*\*\            to USART_DAT register (USART_SendData()).
+*\*\          - TXE flag is cleared only by a write to the USART_DAT register
+*\*\            (USART_SendData()).
+*\*\          - RTO flag is cleared only by a write 1 to the USART_CTRL2.RTOCF bit.
+*\*\            (USART_ClrRTOFlag()).
+**/
+void USART_ClrFlag(USART_Module* USARTx, uint32_t USART_FLAG)
+{
+    USARTx->STS |= USART_FLAG;
+    USARTx->STS &= (~USART_FLAG);
+}
+
+
+/**
+*\*\name    USART_ClrRTOFlag
+*\*\fun     Clears the USARTx's RTO pending flag.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\return  none
+**/
+void USART_ClrRTOFlag(USART_Module* USARTx)
+{
+    uint32_t time_out;
+    USARTx->CTRL2 |= USART_FLAG_RTO;
+    time_out = 0xFFFFU;
+    while (USART_GetFlagStatus(USARTx, USART_FLAG_RTO) == SET)
+    {
+      time_out--;
+      if (time_out <= 1U)
+      {
+        break;
+      }
+    }
+    USARTx->CTRL2 &= (~USART_FLAG_RTO);
+}
+
+/**
+*\*\name    USART_GetIntStatus
+*\*\fun     Checks whether the specified USART interrupt has set or not.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   USART_INT (The input parameters must be the following values):
+*\*\          - USART_INT_PEF   Parity Error interrupt
+*\*\          - USART_INT_TXC   Transmission complete interrupt
+*\*\          - USART_INT_TXDE  Transmit Data Register empty interrupt
+*\*\          - USART_INT_RXDNE Receive Data register not empty interrupt
+*\*\          - USART_INT_IDLEF Idle line detection interrupt
+*\*\          - USART_INT_RTOE  Receiver timeout interrupt
+*\*\          - USART_INT_LINBD LIN Break detection interrupt
+*\*\          - USART_INT_ERRF  Error interrupt(Frame error, noise error, overrun error)
+*\*\          - USART_INT_CTSF  CTS change interrupt
+*\*\return  bitstatus
+*\*\          - SET   
+*\*\          - RESET 
+**/
+INTStatus USART_GetIntStatus(const USART_Module* USARTx, uint32_t USART_INT)
+{
+    uint32_t itmask;
+    INTStatus bitstatus;
+
+    /* Get the interrupt position */
+    itmask = USART_INT & USART_INT_MASK;
+
+    if ((USART_INT & USART_CTRL1_INTMASK) != (uint32_t)0x00U) /* The IT  is in CTRL1 register */
+    {
+        itmask &= USARTx->CTRL1;
+    }
+    else if ((USART_INT & USART_CTRL2_INTMASK) != (uint32_t)0x00U) /* The IT  is in CTRL2 register */
+    {
+        itmask &= USARTx->CTRL2;
+    }
+    else if ((USART_INT & USART_CTRL3_INTMASK) != (uint32_t)0x00U) /* The IT  is in CTRL3 register */
+    {
+        itmask &= USARTx->CTRL3;
+    }
+    else
+    {
+         /* nothing */
+    }
+
+    if (itmask != (uint32_t)RESET)
+    {
+        bitstatus = SET;
+    }
+    else
+    {
+        bitstatus = RESET;
+    }
+
+    return bitstatus;
+}
+
+
+/**
+*\*\name    USART_FirstByteDelayFixSet
+*\*\fun     First byte delay fixed enable or disable.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param  Cmd:(The input parameters must be the following values)
+*\*\          - ENABLE
+*\*\          - DISABLE 
+*\*\return  none
+**/
+void USART_FirstByteDelayFixSet(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd == ENABLE)
+    {
+        USARTx->CTRL1 &= CTRL1_TEDEN_DISABLE;
+    }
+    else
+    {
+        USARTx->CTRL1 |= CTRL1_TEDEN_ENABLE;
+    }
+}
+
+/**
+*\*\name    USART_PinSwapSet
+*\*\fun     Swap TX/RX pins enable or disable.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param  Cmd:(The input parameters must be the following values)
+*\*\          - ENABLE
+*\*\          - DISABLE 
+*\*\return  none
+**/
+void USART_PinSwapSet(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd == ENABLE)
+    {
+        USARTx->CTRL1 |= CTRL1_SWAP_ENABLE;
+    }
+    else
+    {
+        USARTx->CTRL1 &= CTRL1_SWAP_DISABLE;
+    }
+}
+
+/**
+*\*\name    USART_CfgDriverAssertTime
+*\*\fun     Set Driver Enable assertion time.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param  Time:(The input parameters must be the following values)
+*\*\          - 0x01 ~ 0x1F
+*\*\return  none
+**/
+void USART_CfgDriverAssertTime(USART_Module* USARTx, uint32_t Time)
+{
+    USARTx->CTRL1 &= (~USART_CTRL1_DEAT_MASK);
+    USARTx->CTRL1 |= (Time << 21U);
+}
+/**
+*\*\name    USART_CfgDriverdeassertTime
+*\*\fun     Set Driver Enable deassertion time.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param  Time:(The input parameters must be the following values)
+*\*\          - 0x01 ~ 0x1F
+*\*\return  none
+**/
+void USART_CfgDriverdeassertTime(USART_Module* USARTx, uint32_t Time)
+{
+    USARTx->CTRL1 &= (~USART_CTRL1_DEDT_MASK);
+    USARTx->CTRL1 |= (Time << 16U);
+}
+
+/**
+*\*\name    USART_DriverPolaritySet
+*\*\fun     Driver enable polarity selection.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param  Cmd:(The input parameters must be the following values)
+*\*\          - ENABLE
+*\*\          - DISABLE 
+*\*\return  none
+**/
+void USART_DriverPolaritySet(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd == ENABLE)
+    {
+        USARTx->CTRL1 |= CTRL1_DEP_ENABLE;
+    }
+    else
+    {
+        USARTx->CTRL1 &= CTRL1_DEP_DISABLE;
+    }
+}
+
+/**
+*\*\name    USART_DriverModeSet
+*\*\fun     Driver enable mode selection.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param  Cmd:(The input parameters must be the following values)
+*\*\          - ENABLE
+*\*\          - DISABLE 
+*\*\return  none
+**/
+void USART_DriverModeSet(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd == ENABLE)
+    {
+        USARTx->CTRL1 |= CTRL1_DEM_ENABLE;
+    }
+    else
+    {
+        USARTx->CTRL1 &= CTRL1_DEM_DISABLE;
+    }
+}
+
+/**
+*\*\name    USART_RTOSet
+*\*\fun     Receiver timeout enable or disable.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param  Cmd:(The input parameters must be the following values)
+*\*\          - ENABLE
+*\*\          - DISABLE 
+*\*\return  none
+**/
+void USART_RTOSet(USART_Module* USARTx, FunctionalState Cmd)
+{
+    if (Cmd == ENABLE)
+    {
+        USARTx->CTRL2 |= CTRL2_RTO_ENABLE;
+    }
+    else
+    {
+        USARTx->CTRL2 &= CTRL2_RTO_DISABLE;
+    }
+}
+
+/**
+*\*\name    USART_CfgRTOWidth
+*\*\fun     configure receive timeout width.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param  Width:(The input parameters must be the following values)
+*\*\          - 0x00000000 ~ 0x0FFFFFFF
+*\*\return  none
+**/
+void USART_CfgRTOWidth(USART_Module* USARTx, uint32_t Width)
+{
+    USARTx->RTO = Width;
+}
+
+/**
+*\*\name    USART_EnableWakeUp
+*\*\fun     Configures USART low-power mode wakeup (Idle mode only for N32WB033).
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   Cmd (The input parameters must be the following values)
+*\*\          - ENABLE
+*\*\          - DISABLE
+*\*\return  none
+**/
+void USART_EnableWakeUp(USART_Module* USARTx, FunctionalState Cmd)
+{
+     if (Cmd == ENABLE)
+    {
+        USARTx->WKUP |= USART_WAKEUP_ENABLE;
+    }
+    else
+    {
+        USARTx->WKUP &= USART_WAKEUP_DISABLE;
+    }
+}
+
+/**
+*\*\name    USART_WakeUpClr
+*\*\fun     configure when USART wakeup from low power mode, can select weather clear wakeup data.
+*\*\param   USARTx (The input parameters must be the following values):
+*\*\          - USART1
+*\*\          - USART2
+*\*\param   WakeupMode:(The input parameters must be the following values)
+*\*\          - USART_WAKEUP_CLRDATA
+*\*\          - USART_WAKEUP_NOTCLRDATA
+*\*\return  none
+**/
+void USART_CfgWakeUpDataClr(USART_Module* USARTx, uint32_t WakeupMode)
+{
+    if (WakeupMode == USART_WAKEUP_CLRDATA)
+    {
+        USARTx->WKUP &= USART_WAKEUP_CLRDATA;
+    }
+    else
+    {
+        USARTx->WKUP |= USART_WAKEUP_NOTCLRDATA;
+    }
+}

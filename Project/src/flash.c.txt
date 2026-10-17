@@ -1,0 +1,578 @@
+#include "flash.h"
+#include "global_var.h"
+#include <string.h>
+#include <stddef.h>
+#include "Mytask.h"
+#include "led.h"
+#include "ns_log.h"
+#include "n32wb033.h"
+#include "core.h"
+
+static uint8_t flash_range_is_valid(UInt32 addr, UInt32 len)
+{
+    return (uint8_t)((len != 0u) && (addr >= N32WB033_FLASH_BASE) &&
+                     (addr <= N32WB033_FLASH_END) &&
+                     (len <= (N32WB033_FLASH_END - addr + 1u)));
+}
+
+
+void Flash_Read(UInt32 addr, uint8_t *buf, UInt32 len)
+{
+    if((buf == NULL) || (len == 0))
+        return;
+
+    if (flash_range_is_valid(addr, len) == 0u)
+        return;
+
+    memcpy(buf, (const void *)addr, len);
+}
+
+UInt32 Flash_Erase_Sector(UInt32 addr)
+{
+    UInt32 interrupt_state;
+    if((addr < N32WB033_FLASH_BASE) || (addr > N32WB033_FLASH_END))
+        return 1;
+
+    if((addr % N32WB033_FLASH_SECTOR) != 0)
+        return 2;
+
+    interrupt_state = __get_PRIMASK();
+    __set_PRIMASK(1u);
+    {
+        UInt32 st = (UInt32)ROM_SE(addr);
+        __set_PRIMASK(interrupt_state);
+        return st;
+    }
+}
+
+UInt32 Flash_Write(UInt32 addr, const uint8_t *buf, UInt32 len)
+{
+    const uint8_t *p = buf;
+    UInt32 left = len;
+    UInt32 interrupt_state;
+
+    if((buf == NULL) || (len == 0))
+        return 1;
+
+    if (flash_range_is_valid(addr, len) == 0u)
+        return 1;
+
+    while(left > 0)
+    {
+        UInt32 room = FLASH_PAGE_SIZE - (addr % FLASH_PAGE_SIZE);
+        UInt32 n    = (room < left) ? room : left;
+        interrupt_state = __get_PRIMASK();
+        __set_PRIMASK(1u);
+        {
+            UInt32 st = (UInt32)ROM_QPP(addr, (uint8_t *)p, n);
+            __set_PRIMASK(interrupt_state);
+
+            if(st != FlashOperationSuccess)
+                return 3;
+        }
+        addr += n;
+        p    += n;
+        left -= n;
+    }
+
+    return 0u;
+}
+
+#define FLASH_DISPLAY_MODE_MAGIC    0x594C4D44u
+#define FLASH_DISPLAY_MODE_VERSION  1u
+
+typedef struct
+{
+    UInt32 magic;
+    UInt16 version;
+    Byte mode;
+    Byte mode_inverse;
+} flash_display_mode_record_t;
+
+typedef char flash_display_mode_record_size[
+    (sizeof(flash_display_mode_record_t) == 8u) ? 1 : -1];
+
+#define FLASH_DEFERRED_POLL_MS 5u
+
+typedef struct
+{
+    Int16 (*writer)(void *);
+    uint8_t (*busy)(void);
+    void (*fault)(void *);
+    void *context;
+    UInt32 scheduled_tick;
+    UInt32 delay_ms;
+    uint8_t dirty;
+    uint8_t retry_count;
+    uint8_t schedule_failed;
+} flash_deferred_save_t;
+
+static flash_deferred_save_t s_deferred_save;
+static void flash_deferred_save_task(void);
+static void eeprom_save_retry_if_exhausted(void);
+
+static void flash_deferred_save_fault(void)
+{
+    if (s_deferred_save.fault != 0)
+        s_deferred_save.fault(s_deferred_save.context);
+}
+
+static void flash_deferred_save_schedule(UInt32 delay_ms)
+{
+    s_deferred_save.scheduled_tick = TaskGetTick();
+    s_deferred_save.delay_ms = delay_ms;
+    s_deferred_save.schedule_failed = 0u;
+    if ((TaskFind(flash_deferred_save_task) == 0xFFFFu) &&
+        (TaskAdd(FLASH_DEFERRED_POLL_MS, flash_deferred_save_task) == 0u))
+    {
+        s_deferred_save.schedule_failed = 1u;
+        flash_deferred_save_fault();
+        NS_LOG_ERROR("[NVM] cannot schedule target save\r\n");
+    }
+}
+
+void Flash_DeferredSaveCancel(void)
+{
+    (void)TaskDelete(flash_deferred_save_task);
+    s_deferred_save.dirty = 0u;
+    s_deferred_save.retry_count = 0u;
+    s_deferred_save.delay_ms = 0u;
+    s_deferred_save.schedule_failed = 0u;
+}
+
+void Flash_DeferredSaveBind(Int16 (*writer)(void *), uint8_t (*busy)(void), void (*fault)(void *), void *context)
+{
+    Flash_DeferredSaveCancel();
+    s_deferred_save.writer = writer;
+    s_deferred_save.busy = busy;
+    s_deferred_save.fault = fault;
+    s_deferred_save.context = context;
+    eeprom_save_retry_if_exhausted();
+}
+
+void Flash_DeferredSaveRequest(UInt32 delay_ms)
+{
+    if ((delay_ms == 0u) || (delay_ms > 0xFFFFu))
+    {
+        flash_deferred_save_fault();
+        NS_LOG_ERROR("[NVM] invalid save delay\r\n");
+        return;
+    }
+    if (s_deferred_save.writer == 0)
+    {
+        flash_deferred_save_fault();
+        NS_LOG_ERROR("[NVM] deferred save has no writer\r\n");
+        return;
+    }
+
+    s_deferred_save.dirty = 1u;
+    s_deferred_save.retry_count = 0u;
+    flash_deferred_save_schedule(delay_ms);
+}
+
+void Flash_DeferredSaveRetryIfExhausted(void)
+{
+    if ((s_deferred_save.dirty != 0u) &&
+        ((s_deferred_save.retry_count >= FLASH_DEFERRED_SAVE_RETRY_MAX) ||
+         (s_deferred_save.schedule_failed != 0u)))
+        Flash_DeferredSaveRequest(FLASH_DEFERRED_SAVE_DELAY_MS);
+    eeprom_save_retry_if_exhausted();
+}
+
+static void flash_deferred_save_task(void)
+{
+    if ((s_deferred_save.dirty == 0u) || (s_deferred_save.writer == 0) ||
+        (s_deferred_save.schedule_failed != 0u))
+    {
+        (void)TaskDelete(flash_deferred_save_task);
+        return;
+    }
+    if ((UInt32)(TaskGetTick() - s_deferred_save.scheduled_tick) < s_deferred_save.delay_ms)
+        return;
+
+    (void)TaskDelete(flash_deferred_save_task);
+    if ((s_deferred_save.busy != 0) && (s_deferred_save.busy() != 0u))
+    {
+        flash_deferred_save_schedule(FLASH_DEFERRED_SAVE_DELAY_MS);
+        return;
+    }
+
+    s_deferred_save.dirty = 0u;
+    if (s_deferred_save.writer(s_deferred_save.context) == 0)
+    {
+        s_deferred_save.retry_count = 0u;
+        return;
+    }
+
+    s_deferred_save.dirty = 1u;
+    if (s_deferred_save.retry_count < FLASH_DEFERRED_SAVE_RETRY_MAX)
+    {
+        s_deferred_save.retry_count++;
+        flash_deferred_save_schedule(FLASH_DEFERRED_SAVE_RETRY_MS);
+    }
+    else
+    {
+        flash_deferred_save_fault();
+        NS_LOG_ERROR("[NVM] target save failed after %u attempts\r\n",
+                     (unsigned)(FLASH_DEFERRED_SAVE_RETRY_MAX + 1u));
+    }
+}
+
+typedef char eeprom_target_layout[
+    ((sizeof(FlashTargetType) == 48u) &&
+     (offsetof(FlashTargetType, address_le) == 8u) &&
+     (offsetof(FlashTargetType, name) == 14u)) ? 1 : -1];
+typedef char eeprom_system_layout[
+    ((sizeof(SystemType) == EEPROM_SYSTEM_LENGTH) &&
+     (offsetof(SystemType, UpDataState) == 0u) &&
+     (offsetof(SystemType, ComNum) == 1u) &&
+     (offsetof(SystemType, UpDataCrc) == 2u) &&
+     (offsetof(SystemType, UpDataFileLength) == 4u) &&
+     (offsetof(SystemType, Target) == 12u) &&
+     (offsetof(SystemType, YbpModel) == 88u) &&
+     (offsetof(SystemType, SaveTime) == 500u) &&
+     (offsetof(SystemType, SaveCrc) == 504u) &&
+     (offsetof(SystemType, SaveState) == 508u) &&
+     (sizeof(SystemType) <= SYS_DATA_A_SIZE) &&
+     (sizeof(SystemType) <= SYS_DATA_B_SIZE)) ? 1 : -1];
+
+SystemType System;
+static SystemType s_saved_system;
+static Byte s_eeprom_initialized;
+static Byte s_eeprom_valid_mask;
+static Byte s_eeprom_force_b;
+static UInt32 s_eeprom_active_address;
+static flash_deferred_save_t s_system_save;
+static void eeprom_save_task(void);
+static Int16 eeprom_save_schedule(UInt32 delay_ms);
+
+static UInt16 eeprom_crc(const SystemType *record)
+{
+    const Byte *bytes = (const Byte *)record;
+    UInt16 crc = 0xFFFFu;
+    UInt16 index;
+    Byte bit;
+
+    /* Include the BOOT state byte too; normal System records always store zero. */
+    for (index = 0u; index < offsetof(SystemType, SaveCrc); ++index)
+    {
+        crc ^= bytes[index];
+        for (bit = 0u; bit < 8u; ++bit)
+            crc = (UInt16)((crc >> 1) ^ ((crc & 1u) ? 0xA001u : 0u));
+    }
+    return crc;
+}
+
+static Byte eeprom_record_is_valid(const SystemType *record)
+{
+    return (Byte)((record->UpDataState == 0u) &&
+                  (record->Version == EEPROM_SYSTEM_VERSION) &&
+                  (record->Length == sizeof(SystemType)) &&
+                  (record->SaveState == EEPROM_SAVE_MARK) &&
+                  (record->SaveCrc == eeprom_crc(record)));
+}
+
+static Byte eeprom_sequence_is_newer(UInt32 candidate, UInt32 current)
+{
+    UInt32 distance = candidate - current;
+    return (Byte)((distance != 0u) && (distance < 0x80000000u));
+}
+
+static Byte eeprom_upgrade_pending(void)
+{
+    return (Byte)(*(const volatile Byte *)SYS_DATA_A_ADDRESS == 1u);
+}
+
+void EEPROM_Init(void)
+{
+    SystemType record;
+    flash_display_mode_record_t display;
+
+    if (s_eeprom_initialized != 0u)
+        return;
+    s_eeprom_initialized = 1u;
+    memset(&System, 0, sizeof(System));
+    memset(&s_saved_system, 0, sizeof(s_saved_system));
+    s_eeprom_valid_mask = 0u;
+    s_eeprom_active_address = 0u;
+
+    Flash_Read(SYS_DATA_A_ADDRESS, (Byte *)&record, sizeof(record));
+    if (eeprom_record_is_valid(&record) != 0u)
+    {
+        s_saved_system = record;
+        s_eeprom_active_address = SYS_DATA_A_ADDRESS;
+        s_eeprom_valid_mask = 1u;
+    }
+    Flash_Read(SYS_DATA_B_ADDRESS, (Byte *)&record, sizeof(record));
+    if (eeprom_record_is_valid(&record) != 0u)
+    {
+        if ((s_eeprom_valid_mask == 0u) ||
+            (eeprom_sequence_is_newer(record.SaveTime, s_saved_system.SaveTime) != 0u))
+        {
+            s_saved_system = record;
+            s_eeprom_active_address = SYS_DATA_B_ADDRESS;
+        }
+        s_eeprom_valid_mask |= 2u;
+    }
+
+    if (s_eeprom_valid_mask != 0u)
+    {
+        System = s_saved_system;
+        System.UpDataState = 0u;
+        if ((System.YbpModel != 1u) && (System.YbpModel != 2u))
+            System.YbpModel = 1u;
+        return;
+    }
+
+    /* Preserve legacy B until the first complete System has committed in A. */
+    Flash_Read(SYS_DATA_B_ADDRESS, (Byte *)&System.Target, sizeof(System.Target));
+    if ((System.Target.magic != FLASH_TARGET_MAGIC) || (System.Target.type > 2u))
+    {
+        memset(&System.Target, 0, sizeof(System.Target));
+        System.Target.magic = FLASH_TARGET_MAGIC;
+    }
+    System.Version = EEPROM_SYSTEM_VERSION;
+    System.Length = sizeof(SystemType);
+    System.YbpModel = 1u;
+    System.SaveState = EEPROM_SAVE_MARK;
+    Flash_Read(DISPLAY_MODE_ADDRESS, (Byte *)&display, sizeof(display));
+    if ((display.magic == FLASH_DISPLAY_MODE_MAGIC) &&
+        (display.version == FLASH_DISPLAY_MODE_VERSION) &&
+        ((display.mode == 1u) || (display.mode == 2u)) &&
+        ((Byte)(display.mode ^ display.mode_inverse) == 0xFFu))
+        System.YbpModel = display.mode;
+}
+
+static void eeprom_save_cancel(void)
+{
+    (void)TaskDelete(eeprom_save_task);
+    s_system_save.dirty = 0u;
+    s_system_save.retry_count = 0u;
+    s_system_save.schedule_failed = 0u;
+}
+
+static void eeprom_save_committed(void)
+{
+    eeprom_save_cancel();
+    if ((s_eeprom_force_b == 0u) && (s_eeprom_valid_mask != 3u))
+    {
+        s_system_save.dirty = 1u;
+        (void)eeprom_save_schedule(FLASH_DEFERRED_SAVE_DELAY_MS);
+    }
+}
+
+static Int16 eeprom_record_write(UInt32 address, const SystemType *record)
+{
+    Byte mask = (Byte)((address == SYS_DATA_A_ADDRESS) ? 1u : 2u);
+    const SystemType *saved = (const SystemType *)address;
+
+    /* A failed erase/program makes this copy unusable until the full readback passes. */
+    s_eeprom_valid_mask &= (Byte)~mask;
+    if ((Flash_Erase_Sector(address) != 0u) ||
+        (Flash_Write(address, (const Byte *)record,
+                     offsetof(SystemType, SaveState)) != 0u) ||
+        (memcmp((const void *)address, record, offsetof(SystemType, SaveState)) != 0) ||
+        (Flash_Write(address + offsetof(SystemType, SaveState),
+                     (const Byte *)&record->SaveState, sizeof(record->SaveState)) != 0u) ||
+        (memcmp(saved, record, sizeof(*record)) != 0) ||
+        (eeprom_record_is_valid(saved) == 0u))
+        return CHAR_DEV_ERR_STATE;
+    s_eeprom_valid_mask |= mask;
+    return CHAR_DEV_OK;
+}
+
+Int16 EEPROM_Write(void)
+{
+    SystemType record;
+    UInt32 address;
+    Int16 result;
+    Byte unchanged;
+
+    EEPROM_Init();
+    if (eeprom_upgrade_pending() != 0u)
+        return CHAR_DEV_ERR_BUSY;
+
+    record = System;
+    record.UpDataState = 0u;
+    record.Version = EEPROM_SYSTEM_VERSION;
+    record.Length = sizeof(record);
+    record.SaveState = EEPROM_SAVE_MARK;
+    memset(record.Res9, 0, sizeof(record.Res9));
+    unchanged = (Byte)((s_eeprom_active_address != 0u) &&
+                      (memcmp(&record, &s_saved_system,
+                              offsetof(SystemType, SaveTime)) == 0));
+    if ((unchanged != 0u) &&
+        (((s_eeprom_force_b != 0u) && (s_eeprom_active_address == SYS_DATA_B_ADDRESS)) ||
+         ((s_eeprom_force_b == 0u) && (s_eeprom_valid_mask == 3u))))
+    {
+        System.SaveTime = s_saved_system.SaveTime;
+        System.SaveCrc = s_saved_system.SaveCrc;
+        System.SaveState = s_saved_system.SaveState;
+        eeprom_save_committed();
+        return CHAR_DEV_OK;
+    }
+
+    address = (s_eeprom_active_address == SYS_DATA_A_ADDRESS) ?
+               SYS_DATA_B_ADDRESS : SYS_DATA_A_ADDRESS;
+    if (s_eeprom_force_b != 0u)
+    {
+        address = SYS_DATA_B_ADDRESS;
+        if (s_eeprom_active_address == 0u)
+        {
+            record.SaveTime = 1u;
+            record.SaveCrc = eeprom_crc(&record);
+            result = eeprom_record_write(SYS_DATA_A_ADDRESS, &record);
+            if (result != CHAR_DEV_OK)
+                return result;
+            s_saved_system = record;
+            s_eeprom_active_address = SYS_DATA_A_ADDRESS;
+        }
+        if (s_eeprom_active_address == SYS_DATA_B_ADDRESS)
+        {
+            if (((s_eeprom_valid_mask & 1u) == 0u) ||
+                (memcmp((const void *)SYS_DATA_A_ADDRESS, &s_saved_system,
+                        sizeof(s_saved_system)) != 0))
+            {
+                result = eeprom_record_write(SYS_DATA_A_ADDRESS, &s_saved_system);
+                if (result != CHAR_DEV_OK)
+                    return result;
+            }
+            s_eeprom_active_address = SYS_DATA_A_ADDRESS;
+        }
+    }
+
+    record.SaveTime = (s_eeprom_active_address == 0u) ? 1u : s_saved_system.SaveTime + 1u;
+    record.SaveCrc = eeprom_crc(&record);
+    result = eeprom_record_write(address, &record);
+    if (result != CHAR_DEV_OK)
+        return result;
+    s_saved_system = record;
+    s_eeprom_active_address = address;
+    System = record;
+    eeprom_save_committed();
+    return CHAR_DEV_OK;
+}
+
+static Int16 eeprom_save_schedule(UInt32 delay_ms)
+{
+    s_system_save.scheduled_tick = TaskGetTick();
+    s_system_save.delay_ms = delay_ms;
+    s_system_save.schedule_failed = 0u;
+    if ((TaskFind(eeprom_save_task) == 0xFFFFu) &&
+        (TaskAdd(FLASH_DEFERRED_POLL_MS, eeprom_save_task) == 0u))
+    {
+        s_system_save.schedule_failed = 1u;
+        flash_deferred_save_fault();
+        NS_LOG_ERROR("[NVM] cannot schedule System save\r\n");
+        return CHAR_DEV_ERR_STATE;
+    }
+    return CHAR_DEV_OK;
+}
+
+static void eeprom_save_retry_if_exhausted(void)
+{
+    if ((s_system_save.dirty != 0u) &&
+        ((s_system_save.schedule_failed != 0u) ||
+         ((s_system_save.retry_count >= FLASH_DEFERRED_SAVE_RETRY_MAX) &&
+          (TaskFind(eeprom_save_task) == 0xFFFFu))))
+    {
+        s_system_save.retry_count = 0u;
+        (void)eeprom_save_schedule(FLASH_DEFERRED_SAVE_DELAY_MS);
+    }
+}
+
+Int16 EEPROM_Save(UInt16 seconds)
+{
+    EEPROM_Init();
+    if (seconds == 0u)
+        return EEPROM_Write();
+    if (eeprom_upgrade_pending() != 0u)
+        return CHAR_DEV_ERR_BUSY;
+    s_system_save.dirty = 1u;
+    s_system_save.retry_count = 0u;
+    return eeprom_save_schedule((UInt32)seconds * 1000u);
+}
+
+static void eeprom_save_task(void)
+{
+    Int16 result;
+
+    if ((s_system_save.dirty == 0u) || (s_system_save.schedule_failed != 0u))
+    {
+        (void)TaskDelete(eeprom_save_task);
+        return;
+    }
+    if ((UInt32)(TaskGetTick() - s_system_save.scheduled_tick) < s_system_save.delay_ms)
+        return;
+    (void)TaskDelete(eeprom_save_task);
+    if ((eeprom_upgrade_pending() != 0u) ||
+        ((s_deferred_save.busy != 0) && (s_deferred_save.busy() != 0u)))
+    {
+        (void)eeprom_save_schedule(FLASH_DEFERRED_SAVE_DELAY_MS);
+        return;
+    }
+    result = EEPROM_Write();
+    if (result == CHAR_DEV_OK)
+        return;
+    if (result == CHAR_DEV_ERR_BUSY)
+    {
+        (void)eeprom_save_schedule(FLASH_DEFERRED_SAVE_DELAY_MS);
+        return;
+    }
+    if (s_system_save.retry_count < FLASH_DEFERRED_SAVE_RETRY_MAX)
+    {
+        ++s_system_save.retry_count;
+        (void)eeprom_save_schedule(FLASH_DEFERRED_SAVE_RETRY_MS);
+    }
+    else
+    {
+        flash_deferred_save_fault();
+        NS_LOG_ERROR("[NVM] System save failed after %u attempts\r\n",
+                     (unsigned)(FLASH_DEFERRED_SAVE_RETRY_MAX + 1u));
+    }
+}
+
+Int16 EEPROM_PrepareUpgrade(void)
+{
+    Int16 result = CHAR_DEV_OK;
+
+    EEPROM_Init();
+    if (eeprom_upgrade_pending() != 0u)
+        return CHAR_DEV_ERR_BUSY;
+    s_eeprom_force_b = 1u;
+    if (s_deferred_save.writer != 0)
+        result = s_deferred_save.writer(s_deferred_save.context);
+    if (result == CHAR_DEV_OK)
+        result = EEPROM_Write();
+    s_eeprom_force_b = 0u;
+    if (result == CHAR_DEV_OK)
+        Flash_DeferredSaveCancel();
+    return result;
+}
+
+Byte Flash_DisplayModeLoad(void)
+{
+    EEPROM_Init();
+    return ((System.YbpModel == 1u) || (System.YbpModel == 2u)) ? System.YbpModel : 1u;
+}
+
+Int16 Flash_DisplayModeSave(Byte mode)
+{
+    Byte previous;
+    Int16 result;
+
+    if ((mode != 1u) && (mode != 2u))
+        return CHAR_DEV_ERR_PARAM;
+    EEPROM_Init();
+    if (mode == System.YbpModel)
+    {
+        eeprom_save_retry_if_exhausted();
+        return CHAR_DEV_OK;
+    }
+    previous = System.YbpModel;
+    System.YbpModel = mode;
+    result = EEPROM_Save(5u);
+    if (result != CHAR_DEV_OK)
+        System.YbpModel = previous;
+    return result;
+}

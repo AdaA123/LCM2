@@ -1,0 +1,63 @@
+#ifndef MY_BLE_H
+#define MY_BLE_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "type.h"
+
+typedef enum
+{
+    MY_BLE_EVENT_READY = 0,
+    MY_BLE_EVENT_ACTIVITY,
+    MY_BLE_EVENT_CONNECTION_FAILED,
+    MY_BLE_EVENT_ERROR,
+    MY_BLE_EVENT_INIT_CHECK,
+    MY_BLE_EVENT_STORAGE_ERROR = 5
+} my_ble_event_t;
+typedef void (*my_ble_event_handler_t)(my_ble_event_t event);
+typedef Int16 (*my_ble_event_subscriber_t)(my_ble_event_t event);
+
+typedef struct
+{
+    Byte phone_linked;
+    Byte bms_linked;
+    Byte bms_ready;
+    Byte connecting;
+    Byte advertising;
+    Byte scanning;
+} my_ble_status_t;
+
+void My_Ble_EventHandlerSet(my_ble_event_handler_t handler);
+Int16 My_Ble_EventSubscribe(my_ble_event_subscriber_t handler, Byte priority);
+void My_Ble_StatusGet(my_ble_status_t *snapshot);
+void My_Ble_ProcessRequest(void);
+
+void My_Ble_Init(void);
+void My_Ble_Run(void);
+
+Int16 My_Ble_LocalNameSet(const Byte *name, uint16_t length);
+Int16 My_Ble_LocalMacSet(const Byte mac_msb[6]);
+/* Set the validated name, MAC and prefix-derived project as one record. */
+Int16 My_Ble_LocalIdentitySet(const Byte *name, UInt16 length,
+                            const Byte mac_msb[6]);
+UInt16 My_Ble_ProjectNoGet(void);
+/* 低 4 位为 SlaveModel，高 12 位为 HostModel。 */
+Int16 My_Ble_ProjectNoSet(uint16_t project_no);
+Int16 My_Ble_AdvertisingIntervalSet(uint16_t interval_ms);
+
+Int16 My_Ble_TargetSetName(const Byte *name, uint16_t length);
+Int16 My_Ble_TargetSetAddress(const Byte address_msb[6]);
+Int16 My_Ble_TargetClear(void);
+
+Byte My_Ble_BmsReady(void);
+Byte My_Ble_BackgroundBusy(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

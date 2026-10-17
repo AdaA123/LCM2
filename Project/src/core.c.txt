@@ -1,0 +1,174 @@
+#include "core.h"
+
+static uint8_t is_registered(const device_t *dev)
+{
+    return (uint8_t)((dev != 0) && (dev->ops != 0) &&
+                     (dev->state >= CHAR_DEV_STATE_REGISTERED) &&
+                     (dev->state <= CHAR_DEV_STATE_OPEN));
+}
+
+int Register(device_t *dev, const ops_t *ops, void *user_data)
+{
+    if((dev == 0) || (ops == 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    if((dev->state != CHAR_DEV_STATE_UNREGISTERED) && (dev->state != CHAR_DEV_STATE_ERROR))
+        return CHAR_DEV_ERR_STATE;
+
+    dev->ops = ops;
+    dev->user_data = user_data;
+    dev->rx_indicate = 0;
+    dev->tx_complete = 0;
+    dev->open_flag = 0u;
+    dev->state = CHAR_DEV_STATE_REGISTERED;
+    return CHAR_DEV_OK;
+}
+
+int rx_indicate_set(device_t *dev, rx_indicate_t callback)
+{
+    if(is_registered(dev) == 0u)
+        return CHAR_DEV_ERR_PARAM;
+
+    dev->rx_indicate = callback;
+    return CHAR_DEV_OK;
+}
+
+int tx_complete_set(device_t *dev, tx_complete_t callback)
+{
+    if(is_registered(dev) == 0u)
+        return CHAR_DEV_ERR_PARAM;
+
+    dev->tx_complete = callback;
+    return CHAR_DEV_OK;
+}
+
+int init(device_t *dev)
+{
+    int result = CHAR_DEV_OK;
+
+    if((dev == 0) || (dev->ops == 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    if(dev->state != CHAR_DEV_STATE_REGISTERED)
+        return CHAR_DEV_ERR_STATE;
+
+    if(dev->ops->init != 0)
+        result = dev->ops->init(dev);
+
+    dev->state = (result == CHAR_DEV_OK) ? CHAR_DEV_STATE_INITIALIZED : CHAR_DEV_STATE_ERROR;
+    return result;
+}
+
+int open(device_t *dev, uint16_t oflag)
+{
+    int result = CHAR_DEV_OK;
+
+    if((dev == 0) || (dev->ops == 0) || ((oflag & CHAR_DEV_OFLAG_MASK) == 0u) || ((oflag & (uint16_t)~CHAR_DEV_OFLAG_MASK) != 0u))
+        return CHAR_DEV_ERR_PARAM;
+
+    if(dev->state != CHAR_DEV_STATE_INITIALIZED)
+        return CHAR_DEV_ERR_STATE;
+
+    if(dev->ops->open != 0)
+        result = dev->ops->open(dev, oflag);
+
+    if(result == CHAR_DEV_OK)
+    {
+        dev->open_flag = oflag;
+        dev->state = CHAR_DEV_STATE_OPEN;
+    }
+
+    return result;
+}
+
+int close(device_t *dev)
+{
+    int result = CHAR_DEV_OK;
+
+    if((dev == 0) || (dev->ops == 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    if(dev->state != CHAR_DEV_STATE_OPEN)
+        return CHAR_DEV_ERR_STATE;
+
+    if(dev->ops->close != 0)
+        result = dev->ops->close(dev);
+
+    if(result == CHAR_DEV_OK)
+    {
+        dev->open_flag = 0u;
+        dev->state = CHAR_DEV_STATE_INITIALIZED;
+    }
+
+    return result;
+}
+
+int read(device_t *dev, uint32_t pos, void *buffer, uint32_t size)
+{
+    if((dev == 0) || (dev->ops == 0) || ((buffer == 0) && (size != 0u)))
+        return CHAR_DEV_ERR_PARAM;
+
+    if((dev->state != CHAR_DEV_STATE_OPEN) || ((dev->open_flag & CHAR_DEV_OFLAG_RDONLY) == 0u))
+        return CHAR_DEV_ERR_STATE;
+
+    if(size == 0u)
+        return 0;
+
+    if(dev->ops->read == 0)
+        return CHAR_DEV_ERR_STATE;
+
+    return dev->ops->read(dev, pos, buffer, size);
+}
+
+int write(device_t *dev, uint32_t pos, const void *buffer, uint32_t size)
+{
+    if((dev == 0) || (dev->ops == 0) || ((buffer == 0) && (size != 0u)))
+        return CHAR_DEV_ERR_PARAM;
+
+    if((dev->state != CHAR_DEV_STATE_OPEN) || ((dev->open_flag & CHAR_DEV_OFLAG_WRONLY) == 0u))
+        return CHAR_DEV_ERR_STATE;
+
+    if(size == 0u)
+        return 0;
+
+    if(dev->ops->write == 0)
+        return CHAR_DEV_ERR_STATE;
+
+    return dev->ops->write(dev, pos, buffer, size);
+}
+
+int control(device_t *dev, int cmd, void *arg)
+{
+    if((dev == 0) || (dev->ops == 0))
+        return CHAR_DEV_ERR_PARAM;
+
+    if((dev->state < CHAR_DEV_STATE_INITIALIZED) || (dev->state > CHAR_DEV_STATE_OPEN))
+        return CHAR_DEV_ERR_STATE;
+
+    if(dev->ops->control == 0)
+        return CHAR_DEV_ERR_STATE;
+
+    return dev->ops->control(dev, cmd, arg);
+}
+
+int rx_indicate(device_t *dev, uint32_t size)
+{
+    if(is_registered(dev) == 0u)
+        return CHAR_DEV_ERR_PARAM;
+
+    if(dev->rx_indicate != 0)
+        dev->rx_indicate(dev, size);
+
+    return CHAR_DEV_OK;
+}
+
+int tx_complete(device_t *dev, const void *buffer)
+{
+    if(is_registered(dev) == 0u)
+        return CHAR_DEV_ERR_PARAM;
+
+    if(dev->tx_complete != 0)
+        dev->tx_complete(dev, buffer);
+
+    return CHAR_DEV_OK;
+}

@@ -1,0 +1,133 @@
+#ifndef BLE_PORT_H
+#define BLE_PORT_H
+
+#include "core.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    BLE_ENDPOINT_PHONE = 0,
+    BLE_ENDPOINT_BMS,
+    BLE_ENDPOINT_COUNT,
+    BLE_ENDPOINT_INVALID = 0xFF
+} ble_endpoint_id_t;
+
+typedef struct {
+    uint8_t advertising;   /**< 广播中 */
+    uint8_t scanning;      /**< 扫描中 */
+    uint8_t connecting;    /**< 连接中 */
+    uint8_t phone_linked;  /**< 主机连入 */
+    uint8_t bms_linked;    /**< 从机连上 */
+    uint8_t scan_active;
+} ble_port_status_t;
+
+typedef enum {
+    BLE_PORT_EVENT_READY = 0,    /**< 蓝牙初始化就绪 */
+    BLE_PORT_EVENT_LINK_UP,      /**< 主/从机连接上了 */
+    BLE_PORT_EVENT_LINK_DOWN,    /**< 主/从机断开了 */
+    BLE_PORT_EVENT_SCAN_REPORT,  /**< 捕获到从机广播 */
+    BLE_PORT_EVENT_CONTROL_RX,   /**< 收到从机数据 */
+    BLE_PORT_EVENT_BMS_READY,     /**< 从机通讯就绪 */
+	BLE_PORT_EVENT_CENTRAL_IDLE,
+    BLE_PORT_EVENT_BMS_SECURED,   /**< 从机配对/加密完成，可以进行服务发现与数据交互 */
+    BLE_PORT_EVENT_BMS_PAIR_FAILED /**< 从机配对失败（底层随后会断开连接） */
+} ble_port_event_t;
+
+typedef void (*ble_port_event_cb_t)(void *user_data,
+                                    device_t *device,
+                                    ble_port_event_t event,
+                                    const void *parameter);
+
+#define BLE_DEV_IOC_SCAN_START        	1   /**< 启动扫描 */
+#define BLE_DEV_IOC_SCAN_STOP         	2   /**< 停止扫描 */
+#define BLE_DEV_IOC_ADV_START         	3   /**< 开启广播 */
+#define BLE_DEV_IOC_ADV_STOP          	4   /**< 关闭广播 */
+#define BLE_DEV_IOC_DISCONNECT        	5   /**< 强制断开连接 */
+#define BLE_DEV_IOC_UPDATE_PARAM      	7   /**< 更新连接参数 */
+#define BLE_DEV_IOC_CONNECT          	10   /**< 向从机发起连接 */
+#define BLE_DEV_IOC_CONNECT_CANCEL   	26   /**< 取消连接 */
+#define BLE_DEV_IOC_ADV_DIAG         	13   /**< 看门狗 */
+#define BLE_DEV_IOC_CONFIGURE        	15   /**< 端口配置参数 */
+#define BLE_DEV_IOC_SET_SCAN_FILTER  	25   /**< 配置扫描过滤规则 */
+#define BLE_DEV_IOC_BMS_DATA_ENABLE  	27   /**< 使能从机数据通道 */
+#define BLE_DEV_IOC_CONTROL_REPLY    	28   /**< 接收的数据回传 */
+#define BLE_DEV_IOC_PROCESS          	29   /**< 数据吞吐操作 */
+#define BLE_DEV_IOC_GET_STATUS       	30   /**< 获取状态 */
+#define BLE_DEV_IOC_RX_COUNT         	31   /**< 查询缓冲区未读有效总字节数 */
+#define BLE_DEV_IOC_RX_NEXT_SIZE     	32   /**< 查询缓冲区队列下一包未读字节长度 */
+#define BLE_DEV_IOC_TX_SPACE         	33   /**< 查询缓冲区剩余可用空间 */
+#define BLE_DEV_IOC_EXCHANGE_MTU     34
+#define BLE_DEV_IOC_SCAN_MONITOR_START 	35 
+#define BLE_DEV_IOC_RX_PEEK           	36
+#define BLE_DEV_IOC_BMS_PAIR_START   	37   /**< 中央角色向从机发起SMP配对（绑定/加密） */
+
+#define BLE_SCAN_FILTER_DISABLE      0u   /**< 禁用扫描过滤 */
+#define BLE_SCAN_FILTER_BY_ADDRESS   1u   /**< 按蓝牙MAC地址过滤 */
+#define BLE_SCAN_FILTER_BY_NAME      2u   /**< 按广播设备名过滤 */
+
+typedef struct {
+    uint8_t type;
+    const uint8_t *data;
+} ble_scan_filter_t;
+
+typedef struct {
+    const char    *name;
+    const uint8_t *mac_msb;
+    uint16_t       advertising_interval_ms;
+} ble_device_settings_t;
+
+typedef struct {
+    uint8_t mac[6];
+    uint8_t addr_type;
+} ble_dev_mac_t;
+
+typedef struct {
+    uint16_t min_ms;     /**< 最小连接间隔 */
+    uint16_t max_ms;     /**< 最大连接间隔 */
+    uint16_t latency;    /**< 终止连接计数 */
+    uint16_t timeout_ms; /**< 超时时间 */
+} ble_conn_param_t;
+
+typedef struct {
+    uint8_t role;
+    const uint8_t *mac;
+    uint16_t conn_handle;
+} ble_dev_conn_info_t;
+
+typedef struct {
+    const uint8_t *adv_data;
+    uint8_t adv_len;
+    int8_t rssi;
+    const uint8_t *mac;
+    uint8_t addr_type;
+} ble_scan_report_t;
+
+typedef struct {
+    const uint8_t *data;
+    uint16_t len;
+} ble_data_event_t;
+
+typedef struct {
+    uint8_t *data;
+    uint16_t capacity;
+    uint16_t length;
+} ble_rx_peek_t;
+
+typedef struct {
+    uint8_t        command; /**< 控制命令 */
+    uint8_t        status;  /**< 执行结果 (0=成功, 非0=具体失败错误码) */
+    const uint8_t *data;    
+    uint16_t       length; 
+} ble_control_reply_t;
+
+int ble_port_register(ble_port_event_cb_t callback, void *user_data);
+device_t *ble_port_phone_device(void);
+device_t *ble_port_bms_device(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* BLE_PORT_H */

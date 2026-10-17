@@ -1,0 +1,323 @@
+#include "led.h"
+#include "n32wb033.h"
+#include "Mytask.h"
+#include "my_ble.h"
+#include "update.h"
+#include "core.h"
+
+#define LED_PIN_MASK                    0x00000001u
+#define LED_GPIO_MODE_MASK              0x00000003u
+#define LED_GPIO_MODE_OUTPUT            0x00000001u
+#define LED_GPIO_DRIVE_MASK             0x00000003u
+#define LED_GPIO_DRIVE_4MA              0x00000002u
+#define LED_ACTIVITY_TICKS              4u
+#define LED_CONNECTION_FAILED_TICKS     40u
+#define LED_OVERRIDE_NONE               LED_STATE_COUNT
+
+typedef struct
+{
+    Byte level;
+    Byte ticks;
+} led_segment_t;
+
+typedef struct
+{
+    const led_segment_t *segments;
+    Byte count;
+} led_pattern_t;
+
+typedef struct
+{
+    led_state_t base_state;
+    led_state_t effective_state;
+    led_state_t override_state;
+    UInt16 override_ticks;
+    Byte segment_index;
+    Byte segment_ticks;
+    Byte initialized;
+} led_context_t;
+
+#define LED_PATTERN(name, ...) \
+    static const led_segment_t name[] = { __VA_ARGS__ }
+#define LED_SEGMENT(level_, ticks_) { (level_), (ticks_) }
+#define LED_ARRAY_COUNT(array_) \
+    ((Byte)(sizeof(array_) / sizeof((array_)[0])))
+
+LED_PATTERN(s_pattern_standby, LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 38u));//待机模式
+LED_PATTERN(s_pattern_normal, LED_SEGMENT(1u, 10u), LED_SEGMENT(0u, 10u));//正常运行
+LED_PATTERN(s_pattern_master_connecting, LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 2u));//主机连接中
+LED_PATTERN(s_pattern_slave_connected, LED_SEGMENT(1u, 4u), LED_SEGMENT(0u, 36u));//从机已连接
+LED_PATTERN(s_pattern_master_connected, LED_SEGMENT(1u, 3u), LED_SEGMENT(0u, 3u), LED_SEGMENT(1u, 3u), LED_SEGMENT(0u, 31u));//主机已连接
+LED_PATTERN(s_pattern_connected, LED_SEGMENT(1u, 1u));//主从均连接成功
+LED_PATTERN(s_pattern_connection_failed, LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 2u), LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 2u), LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 30u));//连接失败
+LED_PATTERN(s_pattern_communication, LED_SEGMENT(1u, 1u), LED_SEGMENT(0u, 1u));//通讯
+LED_PATTERN(s_pattern_upgrade, LED_SEGMENT(1u, 5u), LED_SEGMENT(0u, 5u));//升级
+LED_PATTERN(s_pattern_error,
+            LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 2u),
+            LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 2u),
+            LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 4u),
+            LED_SEGMENT(1u, 6u), LED_SEGMENT(0u, 2u),
+            LED_SEGMENT(1u, 6u), LED_SEGMENT(0u, 2u),
+            LED_SEGMENT(1u, 6u), LED_SEGMENT(0u, 4u),
+            LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 2u),
+            LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 2u),
+            LED_SEGMENT(1u, 2u), LED_SEGMENT(0u, 14u));//报错
+
+static const led_pattern_t s_patterns[LED_STATE_COUNT] =
+{
+    {s_pattern_standby, LED_ARRAY_COUNT(s_pattern_standby)},
+    {s_pattern_normal, LED_ARRAY_COUNT(s_pattern_normal)},
+    {
+        s_pattern_master_connecting,
+        LED_ARRAY_COUNT(s_pattern_master_connecting)
+    },
+    {
+        s_pattern_slave_connected,
+        LED_ARRAY_COUNT(s_pattern_slave_connected)
+    },
+    {
+        s_pattern_master_connected,
+        LED_ARRAY_COUNT(s_pattern_master_connected)
+    },
+    {s_pattern_connected, LED_ARRAY_COUNT(s_pattern_connected)},
+    {
+        s_pattern_connection_failed,
+        LED_ARRAY_COUNT(s_pattern_connection_failed)
+    },
+    {s_pattern_communication, LED_ARRAY_COUNT(s_pattern_communication)},
+    {s_pattern_upgrade, LED_ARRAY_COUNT(s_pattern_upgrade)},
+    {s_pattern_error, LED_ARRAY_COUNT(s_pattern_error)}
+};//不同状态不同动作列表
+
+static led_context_t s_led;
+
+
+static void led_output_write(Byte level)
+{
+    if (level != 0u)
+        GPIOB->PBSC = LED_PIN_MASK;
+    else
+        GPIOB->PBC = LED_PIN_MASK;
+}
+
+
+static void led_pattern_start(led_state_t state)
+{
+    const led_pattern_t *pattern;
+
+    if (state >= LED_STATE_COUNT)
+        state = LED_STATE_ERROR;
+
+    pattern = &s_patterns[state];
+    s_led.effective_state = state;
+    s_led.segment_index = 0u;
+    s_led.segment_ticks = pattern->segments[0].ticks;
+    led_output_write(pattern->segments[0].level);
+}
+
+static led_state_t led_effective_state_get(void)
+{
+    if (s_led.base_state == LED_STATE_ERROR)
+        return LED_STATE_ERROR;
+
+    if (s_led.base_state == LED_STATE_UPGRADE)
+        return LED_STATE_UPGRADE;
+
+    if ((s_led.override_ticks != 0u) && (s_led.override_state < LED_STATE_COUNT))
+        return s_led.override_state;
+
+    return s_led.base_state;
+}
+
+static void led_effective_state_refresh(void)
+{
+    led_state_t state = led_effective_state_get();
+
+    if (state != s_led.effective_state)
+        led_pattern_start(state);
+}
+
+static Int16 led_ble_event(my_ble_event_t event)
+{
+    switch (event)
+    {
+        case MY_BLE_EVENT_READY:
+            Led_StateSet(LED_STATE_NORMAL);
+            return Led_TaskStart();
+        case MY_BLE_EVENT_ACTIVITY:
+            Led_ActivityNotify();
+            break;
+        case MY_BLE_EVENT_CONNECTION_FAILED:
+            Led_ConnectionFailedNotify();
+            break;
+        case MY_BLE_EVENT_STORAGE_ERROR:
+            Led_StateSet(LED_STATE_ERROR);
+            break;
+        case MY_BLE_EVENT_ERROR:
+            /* Error indication must keep advancing in the peripheral task. */
+            Led_StateSet(LED_STATE_ERROR);
+            return Led_TaskStart();
+        default:
+            break;
+    }
+    return CHAR_DEV_OK;
+}
+
+void Led_Init(void)
+{
+    RCC->APB2PCLKEN |= RCC_APB2PCLKEN_IOPBEN;
+    GPIOB->PBC = LED_PIN_MASK;
+    GPIOB->POTYPE &= ~LED_PIN_MASK;
+    GPIOB->PUPD &= ~LED_GPIO_MODE_MASK;
+    GPIOB->DS = (GPIOB->DS & ~LED_GPIO_DRIVE_MASK) |
+                LED_GPIO_DRIVE_4MA;
+    GPIOB->PMODE = (GPIOB->PMODE & ~LED_GPIO_MODE_MASK) |
+                   LED_GPIO_MODE_OUTPUT;
+
+    s_led.base_state = LED_STATE_STANDBY;
+    s_led.override_state = LED_OVERRIDE_NONE;
+    s_led.override_ticks = 0u;
+    s_led.effective_state = LED_STATE_COUNT;
+    s_led.segment_index = 0u;
+    s_led.segment_ticks = 0u;
+    s_led.initialized = 1u;
+    led_pattern_start(LED_STATE_STANDBY);
+    (void)My_Ble_EventSubscribe(led_ble_event, 1u);
+    /* Show standby/errors even before the BLE stack reports READY. */
+    if (Led_TaskStart() != CHAR_DEV_OK)
+        Led_StateSet(LED_STATE_ERROR);
+}
+
+void Led_StateSet(led_state_t state)
+{
+    if (s_led.initialized == 0u)
+        return;
+
+    if (state >= LED_STATE_COUNT)
+        state = LED_STATE_ERROR;
+
+    if ((s_led.base_state == LED_STATE_ERROR) && (state != LED_STATE_ERROR))
+        return;
+
+    if (state != s_led.base_state)
+    {
+        s_led.base_state = state;
+        led_effective_state_refresh();
+    }
+}
+
+void Led_ActivityNotify(void)
+{
+    if (s_led.initialized == 0u)
+        return;
+
+    if ((s_led.base_state == LED_STATE_ERROR) || (s_led.base_state == LED_STATE_UPGRADE) || (s_led.override_state == LED_STATE_CONNECTION_FAILED))
+        return;
+
+    s_led.override_state = LED_STATE_COMMUNICATION;
+    s_led.override_ticks = LED_ACTIVITY_TICKS;
+    led_effective_state_refresh();
+}
+
+void Led_ConnectionFailedNotify(void)
+{
+    if (s_led.initialized == 0u)
+        return;
+
+    if ((s_led.base_state == LED_STATE_ERROR) || (s_led.base_state == LED_STATE_UPGRADE))
+        return;
+
+    s_led.override_state = LED_STATE_CONNECTION_FAILED;
+    s_led.override_ticks = LED_CONNECTION_FAILED_TICKS;
+    led_effective_state_refresh();
+}
+
+void Led_Tick(void)
+{
+    const led_pattern_t *pattern;
+
+    if (s_led.initialized == 0u)
+        return;
+
+    led_effective_state_refresh();
+    pattern = &s_patterns[s_led.effective_state];
+
+    if ((pattern->count == 0u) || (s_led.segment_index >= pattern->count))
+    {
+        led_pattern_start(LED_STATE_ERROR);
+        pattern = &s_patterns[LED_STATE_ERROR];
+    }
+
+    if (s_led.segment_ticks > 1u)
+        s_led.segment_ticks--;
+    else
+    {
+        s_led.segment_index++;
+
+        if (s_led.segment_index >= pattern->count)
+            s_led.segment_index = 0u;
+
+        s_led.segment_ticks = pattern->segments[s_led.segment_index].ticks;
+        led_output_write(pattern->segments[s_led.segment_index].level);
+    }
+
+    if (s_led.override_ticks != 0u)
+    {
+        s_led.override_ticks--;
+
+        if (s_led.override_ticks == 0u)
+        {
+            s_led.override_state = LED_OVERRIDE_NONE;
+            led_effective_state_refresh();
+        }
+    }
+}
+
+led_state_t Led_StateGet(void)
+{
+    if (s_led.initialized == 0u)
+        return LED_STATE_STANDBY;
+
+    return s_led.effective_state;
+}
+
+/* Select the display state in the peripheral scheduler, not TASK_APP. */
+static void led_task(void)
+{
+    my_ble_status_t status;
+    led_state_t state;
+    My_Ble_StatusGet(&status);
+
+    if (FirmwareUpdate_IsActive() != 0u)
+        state = LED_STATE_UPGRADE;
+    else if ((status.phone_linked != 0u) && (status.bms_linked != 0u) &&
+             (status.bms_ready != 0u))
+        state = LED_STATE_CONNECTED;
+    else if (status.connecting != 0u)
+        state = LED_STATE_MASTER_CONNECTING;
+    else if (status.bms_linked != 0u)
+        state = LED_STATE_MASTER_CONNECTED;
+    else if (status.phone_linked != 0u)
+        state = LED_STATE_SLAVE_CONNECTED;
+    else if ((status.advertising != 0u) || (status.scanning != 0u))
+        state = LED_STATE_NORMAL;
+    else
+        state = LED_STATE_STANDBY;
+
+    Led_StateSet(state);
+    Led_Tick();
+}
+
+Int16 Led_TaskStart(void)
+{
+    if (TaskFind(led_task) != 0xFFFFu)
+        return CHAR_DEV_OK;
+
+    return (TaskAdd(LED_TICK_PERIOD_MS, led_task) != 0u) ?
+           CHAR_DEV_OK : CHAR_DEV_ERR_STATE;
+}
+
+void Led_TaskStop(void)
+{
+    (void)TaskDelete(led_task);
+}

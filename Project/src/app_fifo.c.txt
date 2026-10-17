@@ -1,0 +1,18 @@
+/**
+ * @file app_fifo.c
+ * @brief [DEPRECATED] v2.0 业务层重构: 旧中继队列已移除
+ *
+ *        历史: 本文件曾实现 master_rx 环形队列 (push_master_rx_data_to_fifo /
+ *        pop_matser_rx_to_ble), 承担 BMS->手机 旧上行通道。该通道绕过业务层
+ *        武装门控、无连接归属检查, 已被新链路取代:
+ *
+ *          app_rdtsc.c (BMS Notify)
+ *            -> ble_port_data_rx() -> Core FIFO
+ *            -> my_ble.c (武装门控 / 丢弃统计 / MTU 截断)
+ *            -> app_rdtss_notify_raw() (单飞发送队列, CFM 驱动)
+ *            -> ...0002 Notify -> 手机
+ *
+ *        保留空翻译单元以兼容既有 Keil/EIDE 工程; 可从工程中安全移除本文件。
+ */
+
+/* v2.0: 无实现。 */

@@ -1,0 +1,50 @@
+#ifndef SYS_RINGBUF_H
+#define SYS_RINGBUF_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** @brief 环形缓冲对象: 生产者只写 head, 消费者只写 tail */
+typedef struct 
+{
+    uint8_t          *buffer;    /* 静态缓冲区 (调用方提供)     */
+    uint16_t          capacity;  /* 总容量 (实际可用 capacity-1) */
+    volatile uint16_t head;      /* 写指针 (生产者推进) */
+    volatile uint16_t tail;      /* 读指针 (消费者推进) */
+} sys_ringbuf_t;
+
+/** @brief 初始化: 挂载静态缓冲区并清零读写指针 (capacity 须 >= 2) */
+void     RingBuf_Init(sys_ringbuf_t *rb, uint8_t *buffer, uint16_t capacity);
+
+/** @brief 配置是否合法。非法对象的所有读写接口均安全返回 0。 */
+uint8_t  RingBuf_IsValid(const sys_ringbuf_t *rb);
+
+/** @brief 查询当前占用量 (字节) */
+uint16_t RingBuf_Count(const sys_ringbuf_t *rb);
+
+/** @brief 查询剩余可写空间 (字节) */
+uint16_t RingBuf_Space(const sys_ringbuf_t *rb);
+
+/** @brief 入队 (生产者侧, 只推进 head); 返回实际写入字节数, 满则截断 */
+uint16_t RingBuf_Push(sys_ringbuf_t *rb, const uint8_t *data, uint16_t len);
+
+/** @brief 出队 (消费者侧, 只推进 tail); 返回实际读出字节数, 空则返回 0 */
+uint16_t RingBuf_Pop(sys_ringbuf_t *rb, uint8_t *out, uint16_t len);
+
+/** @brief 无损预读: 拷贝但不推进 tail，供异步发送的“成功后提交”模型使用 */
+uint16_t RingBuf_Peek(const sys_ringbuf_t *rb, uint8_t *out, uint16_t len);
+
+/** @brief 提交消费: 最多推进当前占用量，返回实际丢弃字节数 */
+uint16_t RingBuf_Discard(sys_ringbuf_t *rb, uint16_t len);
+
+/** @brief 复位: 读写指针清零, 作废全部数据 */
+void     RingBuf_Reset(sys_ringbuf_t *rb);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SYS_RINGBUF_H */

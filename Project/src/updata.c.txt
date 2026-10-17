@@ -1,0 +1,2 @@
+/* Deprecated compatibility source. Firmware update implementation moved to
+ * firmware_update.c. This file is intentionally empty and is not built. */
