@@ -102,7 +102,7 @@
 #define SEC_PARAM_OOB                       0                                           /**< Out Of Band data not available. */
 #define SEC_PARAM_KEY_SIZE                  16                                          /**< Minimum encryption key size. 7 to 16 */
 #define SEC_PARAM_BOND                      1                                           /**< Perform bonding. */
-#define SEC_PARAM_MITM                      1                                           /**< Man In The Middle protection not required. */
+#define SEC_PARAM_MITM                      0                                           /**< Man In The Middle protection not required. */
 #define SEC_PARAM_LESC                      0                                           /**< LE Secure Connections not enabled. */
 #define SEC_PARAM_KEYPRESS                  0                                           /**< Keypress notifications not enabled. */
 #define SEC_PARAM_IKEY                      GAP_KDIST_NONE                              /**< Initiator Key Distribution. (@enum gap_kdist) */

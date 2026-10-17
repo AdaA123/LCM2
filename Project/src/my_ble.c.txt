@@ -2219,16 +2219,24 @@ static void ble_gateway_port_event(void *user_data, device_t *device, ble_port_e
                 SysPlatform_TimerSet(BLE_GATEWAY_MSG_DISCOVERY, 1);
             else
             {
-                Proto_BmsDataInvalidate();
+				Proto_BmsDataInvalidate();
                 gateway->bms_rx_seen = 0;
                 gateway->bms_secured = 0;
                 gateway->bms_service_started = 0;
                 ble_gateway_bms_poll_stop();
                 ble_gateway_bms_health_stop();
 
-                // 开启配对等待窗口：窗口内 BMS 发起配对则应答；超时则视为无需配对的 BMS 直接启动服务
-                SysPlatform_TimerClear(BLE_GATEWAY_MSG_PAIR_WAIT);
-                SysPlatform_TimerSet(BLE_GATEWAY_MSG_PAIR_WAIT, BLE_GATEWAY_PAIR_WAIT_MS);
+                // 删除/注释掉死等定时器
+                // SysPlatform_TimerClear(BLE_GATEWAY_MSG_PAIR_WAIT);
+                // SysPlatform_TimerSet(BLE_GATEWAY_MSG_PAIR_WAIT, BLE_GATEWAY_PAIR_WAIT_MS);
+                
+                // 删除/注释掉刚才错误的那句
+                // ns_sec_send_security_req(info->conidx);
+                
+                // 【核心修改】连上之后，立刻开始拉取服务和数据
+                // 此时去读加密的特征值，BMS 会自动拒绝并反向发起配对请求！
+                ble_gateway_bms_service_start(gateway);
+
                 ble_gateway_bms_peer_log("connected", &gateway->bms_peer);
             }
 
