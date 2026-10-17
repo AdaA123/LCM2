@@ -29,6 +29,7 @@
 #define BLE_GATEWAY_BMS_HEALTH_MS       5000u
 #define BLE_GATEWAY_CONNECT_TIMEOUT_MS  3000u  
 #define BLE_GATEWAY_SESSION_TIMEOUT_MS  60000u
+#define BLE_GATEWAY_PAIR_WAIT_MS        3000u               // 等待BMS发起配对的窗口，超时视为无需配对
 
 #define BLE_GATEWAY_FALLBACK_WAIT_MS    60000u
 #define BLE_GATEWAY_FALLBACK_TICK_MS    200u
@@ -54,6 +55,7 @@ enum ble_gateway_message_id
     BLE_GATEWAY_MSG_BMS_HEALTH = 10, // BMS 配置文件 / 首次接收存活超时
     BLE_GATEWAY_MSG_CONNECT_TIMEOUT = 11,  // 底层建连超时事件
     BLE_GATEWAY_MSG_SESSION_TIMEOUT = 12,  // 业务会话总预算超时
+    BLE_GATEWAY_MSG_PAIR_WAIT = 14,        // 配对等待窗口超时：BMS未发起配对则视为无需配对
 };
 
 
@@ -1548,6 +1550,31 @@ static void ble_gateway_bms_peer_log(const char *event, const gateway_bms_peer_i
                 (unsigned)peer->address_type);
 }
 
+// 配对完成(或判定该BMS无需配对)后：交换MTU并发现FF00服务。幂等，重复触发自动忽略。
+static void ble_gateway_bms_service_start(gateway_app_t *gateway)
+{
+    if ((gateway == 0) || (gateway->bms_secured != 0u) ||
+        (ble_gateway_bms_linked(gateway) == 0u))
+        return;
+
+    gateway->bms_secured = 1u;
+    SysPlatform_TimerClear(BLE_GATEWAY_MSG_PAIR_WAIT);
+    NS_LOG_INFO("[BMS] service start (secured/pairless), discovering profile\r\n");
+
+    /* 配对耗时不计入发现阶段预算：重新给完整的健康超时窗口 */
+    SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_HEALTH, BLE_GATEWAY_BMS_HEALTH_MS);
+
+    if (control(gateway->bms, BLE_DEV_IOC_EXCHANGE_MTU, (void *)(uintptr_t)517) != CHAR_DEV_OK)
+        NS_LOG_WARNING("[BMS] MTU exchange request failed\r\n");
+
+    if (control(gateway->bms, BLE_DEV_IOC_BMS_DATA_ENABLE, 0) != CHAR_DEV_OK)
+    {
+        NS_LOG_ERROR("[BMS] profile discovery start failed\r\n");
+        ble_gateway_session_retry(gateway);
+        (void)control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0);
+    }
+}
+
 //广播处理函数
 static Byte ble_gateway_fallback_is_primary(const gateway_app_t *gateway,
                                               const gateway_bms_peer_info_t *peer)
@@ -1944,6 +1971,11 @@ static void ble_gateway_message_process(UInt16 message_id, void const *parameter
             break;
         }
 
+        case BLE_GATEWAY_MSG_PAIR_WAIT:
+            /* 等待窗口结束仍未配对：判定该BMS无需配对，直接进入服务发现 */
+            ble_gateway_bms_service_start(&s_gw_dev);
+            break;
+
         case BLE_GATEWAY_MSG_FALLBACK:
             ble_gateway_fallback_process(&s_gw_dev);
             /* A queued message after disabling must not restart the timer. */
@@ -2195,6 +2227,8 @@ static void ble_gateway_port_event(void *user_data, device_t *device, ble_port_e
                    本机不主动发起，只在底层自动应答配对；待BMS_SECURED事件
                    (配对/加密完成)后再交换MTU、发现服务。5s健康超时兜底 */
                 SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_HEALTH, BLE_GATEWAY_BMS_HEALTH_MS);
+                /* 启动配对等待窗口：窗口内BMS未发起配对，则超时后视为无需配对 */
+                SysPlatform_TimerSet(BLE_GATEWAY_MSG_PAIR_WAIT, BLE_GATEWAY_PAIR_WAIT_MS);
                 ble_gateway_bms_peer_log("connected, waiting pairing", &gateway->bms_peer);
             }
 
@@ -2202,31 +2236,14 @@ static void ble_gateway_port_event(void *user_data, device_t *device, ble_port_e
         }
 
         case BLE_PORT_EVENT_BMS_SECURED:
-            /* 配对/加密完成：此时访问加密属性才不会被拒，开始交换MTU并发现FF00服务。
-               PAIR_SUCCEED与ENC_SUCCEED可能各上报一次，仅处理第一次 */
+            /* 配对/加密完成（PAIR_SUCCEED与ENC_SUCCEED可能各上报一次，
+               由service_start幂等去重）：进入MTU交换与FF00服务发现 */
             if ((endpoInt16 != BLE_ENDPOINT_BMS) ||
                 (gateway->target_restart_pending != 0u) ||
-                (gateway->target_discovery_suspended != 0u) ||
-                (ble_gateway_bms_linked(gateway) == 0u) ||
-                (gateway->bms_secured != 0u))
+                (gateway->target_discovery_suspended != 0u))
                 break;
 
-            gateway->bms_secured = 1u;
-            NS_LOG_INFO("[BMS] link secured, discovering profile\r\n");
-
-            /* 配对耗时不计入发现阶段预算：重新给完整的健康超时窗口 */
-            SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_HEALTH, BLE_GATEWAY_BMS_HEALTH_MS);
-
-            if (control(gateway->bms, BLE_DEV_IOC_EXCHANGE_MTU, (void *)(uintptr_t)517) != CHAR_DEV_OK)
-                NS_LOG_WARNING("[BMS] MTU exchange request failed\r\n");
-
-            if (control(gateway->bms, BLE_DEV_IOC_BMS_DATA_ENABLE, 0) != CHAR_DEV_OK)
-            {
-                NS_LOG_ERROR("[BMS] profile discovery start failed\r\n");
-                ble_gateway_session_retry(gateway);
-                (void)control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0);
-            }
-
+            ble_gateway_bms_service_start(gateway);
             break;
 
         case BLE_PORT_EVENT_BMS_PAIR_FAILED:
@@ -2266,6 +2283,7 @@ static void ble_gateway_port_event(void *user_data, device_t *device, ble_port_e
             else
             {
                 ble_gateway_connect_timeout_stop();
+                SysPlatform_TimerClear(BLE_GATEWAY_MSG_PAIR_WAIT);
                 gateway->bms_rx_seen = 0;
                 gateway->bms_secured = 0;
                 Proto_BmsDataInvalidate();

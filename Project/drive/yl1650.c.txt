@@ -439,9 +439,9 @@ void YL1650_SetIcon(Byte mask, Byte state)
     if(mask & YL1650_ICON_V)
     {
         if(state)
-            g_seg_buf[3] |= (0x01 << 7);
+            g_seg_buf[2] |= (0x01 << 7);
         else
-            g_seg_buf[3] &= ~(0x01 << 7);
+            g_seg_buf[2] &= ~(0x01 << 7);
     }
 }
 

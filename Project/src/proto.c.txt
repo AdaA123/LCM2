@@ -305,7 +305,7 @@ static void proto_fake_data_init(void)
 
 static void proto_handle_x11(const Byte *data, UInt16 data_length)
 {
-    if ((data == 0) || (data_length < sizeof(s_battery_status)))
+    if (data == NULL)
         return;
 
     memcpy(&s_battery_status, data, sizeof(s_battery_status));
