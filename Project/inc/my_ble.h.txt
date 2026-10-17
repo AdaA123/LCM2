@@ -45,7 +45,7 @@ Int16 My_Ble_LocalMacSet(const Byte mac_msb[6]);
 Int16 My_Ble_LocalIdentitySet(const Byte *name, UInt16 length,
                             const Byte mac_msb[6]);
 UInt16 My_Ble_ProjectNoGet(void);
-/* µÕ 4 ŒªŒ™ SlaveModel£¨∏ﬂ 12 ŒªŒ™ HostModel°£ */
+/* ‰Ωé 4 ‰Ωç‰∏∫ SlaveModelÔºåÈ´ò 12 ‰Ωç‰∏∫ HostModel„ÄÇ */
 Int16 My_Ble_ProjectNoSet(uint16_t project_no);
 Int16 My_Ble_AdvertisingIntervalSet(uint16_t interval_ms);
 

@@ -30,9 +30,9 @@ typedef enum {
     BLE_PORT_EVENT_SCAN_REPORT,  /**< 捕获到从机广播 */
     BLE_PORT_EVENT_CONTROL_RX,   /**< 收到从机数据 */
     BLE_PORT_EVENT_BMS_READY,     /**< 从机通讯就绪 */
-	BLE_PORT_EVENT_CENTRAL_IDLE,
-    BLE_PORT_EVENT_BMS_SECURED,   /**< 从机配对/加密完成，可以进行服务发现与数据交互 */
-    BLE_PORT_EVENT_BMS_PAIR_FAILED /**< 从机配对失败（底层随后会断开连接） */
+    BLE_PORT_EVENT_BMS_SECURED,   /**< BMS 配对/加密完成 */
+    BLE_PORT_EVENT_BMS_PAIR_FAILED, /**< BMS 配对失败 */
+	BLE_PORT_EVENT_CENTRAL_IDLE
 } ble_port_event_t;
 
 typedef void (*ble_port_event_cb_t)(void *user_data,
@@ -58,10 +58,9 @@ typedef void (*ble_port_event_cb_t)(void *user_data,
 #define BLE_DEV_IOC_RX_COUNT         	31   /**< 查询缓冲区未读有效总字节数 */
 #define BLE_DEV_IOC_RX_NEXT_SIZE     	32   /**< 查询缓冲区队列下一包未读字节长度 */
 #define BLE_DEV_IOC_TX_SPACE         	33   /**< 查询缓冲区剩余可用空间 */
-#define BLE_DEV_IOC_EXCHANGE_MTU     34
+#define BLE_DEV_IOC_EXCHANGE_MTU     	34
 #define BLE_DEV_IOC_SCAN_MONITOR_START 	35 
 #define BLE_DEV_IOC_RX_PEEK           	36
-#define BLE_DEV_IOC_BMS_PAIR_START   	37   /**< 中央角色向从机发起SMP配对（绑定/加密） */
 
 #define BLE_SCAN_FILTER_DISABLE      0u   /**< 禁用扫描过滤 */
 #define BLE_SCAN_FILTER_BY_ADDRESS   1u   /**< 按蓝牙MAC地址过滤 */

@@ -23,7 +23,6 @@
 #define SYS_PLATFORM_MESSAGE_BASE   ((uint16_t)(TASK_FIRST_MSG(TASK_APP) + 49u))//任务id基址
 #define SYS_PLATFORM_MESSAGE_COUNT  32u//任务数长度
 #define SYS_PLATFORM_TIMER_MIN_MS   1u//任务最小时间
-#define BLE_PORT_FIXED_PASSKEY      123456u  // 对端要求输入passkey时自动回复的固定PIN
 #define SYS_PLATFORM_TIMER_MAX_MS   41943000u//任务最大时间
 #define BLE_PORT_RADIO_TX_POWER     TX_POWER_Pos6_DBM //最大射频
 #define BLE_PORT_DEVICE_ROLE_ALL    0x0Fu//角色掩码
@@ -1093,34 +1092,29 @@ static int endpoint_mtu_exchange(ble_endpoint_ctx_t *endpoint, uint16_t requeste
     return CHAR_DEV_OK;
 }
 
-// SMP安全模块回调：配对/加密结果只关心中央(BMS)链路
+// SEC 模块事件回调：将配对结果上抛为端口事件
 static void port_sec_msg_handler(struct sec_msg_t const *sec_msg)
 {
     ble_endpoint_ctx_t *endpoint;
+    ble_endpoint_id_t id;
 
-    if ((sec_msg == 0) || (sec_msg->conidx >= APP_CON_IDX_MAX))
+    if (sec_msg == 0)
         return;
 
-    if (endpoint_id_from_conn_index(sec_msg->conidx) != BLE_ENDPOINT_BMS)
-        return; /* 手机(peripheral)侧的配对不影响BMS业务流程 */
+    id = endpoint_id_from_conn_index(sec_msg->conidx);
+    if (id != BLE_ENDPOINT_BMS)
+        return;
 
     endpoint = endpoint_get(BLE_ENDPOINT_BMS);
 
     switch (sec_msg->msg_id)
     {
-        case NS_SEC_PAIR_SUCCEED:  /* 首次配对绑定成功 */
-        case NS_SEC_ENC_SUCCEED:  /* 已绑定设备重连加密成功 */
+        case NS_SEC_PAIR_SUCCEED:
             port_event_emit(endpoint, BLE_PORT_EVENT_BMS_SECURED, 0);
             break;
 
         case NS_SEC_PAIR_FAILED:
-            /* 底层ns_sec在配对失败后会主动断开，这里仅通知应用记录日志 */
             port_event_emit(endpoint, BLE_PORT_EVENT_BMS_PAIR_FAILED, 0);
-            break;
-
-        case NS_SEC_PINCODE_ENTER:
-            /* 本机无输入/显示：对端要求输入passkey时回复固定PIN（Just Works设备不会走到这里） */
-            ns_sec_pincode_respond(sec_msg->conidx, BLE_PORT_FIXED_PASSKEY);
             break;
 
         default:
@@ -1128,14 +1122,15 @@ static void port_sec_msg_handler(struct sec_msg_t const *sec_msg)
     }
 }
 
-// 初始化SMP安全模块（参数取自app_user_config.h，与手机配对弹窗所要求的绑定一致）
+// 初始化安全模块(Just Works，不存绑定，每次重连重新配对)
 static void port_sec_init(void)
 {
-    struct ns_sec_init_t sec_init = {0};
+    struct ns_sec_init_t sec_init;
 
+    memset(&sec_init, 0, sizeof(sec_init));
     sec_init.rand_pin_enable = false;
-    sec_init.pin_code = BLE_PORT_FIXED_PASSKEY;
-    sec_init.pairing_feat.auth      = (SEC_PARAM_BOND | (SEC_PARAM_MITM << 2) | (SEC_PARAM_LESC << 3) | (SEC_PARAM_KEYPRESS << 4));
+    sec_init.pin_code = 123456;
+    sec_init.pairing_feat.auth      = SEC_PARAM_BOND;
     sec_init.pairing_feat.iocap     = SEC_PARAM_IO_CAPABILITIES;
     sec_init.pairing_feat.key_size  = SEC_PARAM_KEY_SIZE;
     sec_init.pairing_feat.oob       = SEC_PARAM_OOB;
@@ -1145,7 +1140,7 @@ static void port_sec_init(void)
     sec_init.bond_enable            = BOND_STORE_ENABLE;
     sec_init.bond_db_addr           = BOND_DATA_BASE_ADDR;
     sec_init.bond_max_peer          = MAX_BOND_PEER;
-    sec_init.bond_sync_delay        = 2000u;
+    sec_init.bond_sync_delay        = 0;
     sec_init.ns_sec_msg_handler     = port_sec_msg_handler;
     ns_sec_init(&sec_init);
 }
@@ -1165,7 +1160,6 @@ static int rw_stack_start(void)
     stack_cfg.user_msg_handler = 0;
     stack_cfg.lsc_cfg = BLE_LSC_LSI_32000HZ;
     ns_ble_stack_init(&stack_cfg);
-    port_sec_init();           /* 初始化SMP配对/绑定参数与回调，供中央连接BMS时发起配对 */
     rw_env_refresh(0);
     (void)ns_ble_add_prf_func_register(app_rdtss_add_rdts);
     (void)ns_ble_add_prf_func_register(app_svc_add);
@@ -1177,6 +1171,8 @@ static int rw_stack_start(void)
         NS_LOG_ERROR("[BLE_PORT] TASK_APP message handler registration failed\r\n");
         return CHAR_DEV_ERR_STATE;
     }
+
+    port_sec_init();
 
     return CHAR_DEV_OK;
 }
@@ -1494,14 +1490,6 @@ static int rw_control(struct device *dev, int cmd, void *arg)
                 return CHAR_DEV_ERR_STATE;
 
             app_rdtsc_enable_prf(endpoint->conn_index);
-            return CHAR_DEV_OK;
-
-        case BLE_DEV_IOC_BMS_PAIR_START:
-            /* 中央角色主动发起SMP配对（绑定+加密），配对结果通过BMS_SECURED/BMS_PAIR_FAILED事件上报 */
-            if ((endpoint->id != BLE_ENDPOINT_BMS) || (endpoint_is_connected(endpoint) == 0u))
-                return CHAR_DEV_ERR_STATE;
-
-            ns_sec_send_bond_start(endpoint->conn_index);
             return CHAR_DEV_OK;
 
         case BLE_DEV_IOC_CONTROL_REPLY:

@@ -8,6 +8,8 @@
 #include "flash.h"
 #include "global_var.h"
 #include "ns_log.h"
+#include "ns_sec.h"
+#include "yl1650.h"
 #include "Mytask.h"
 #include "n32wb033.h"
 #include <string.h>
@@ -29,7 +31,7 @@
 #define BLE_GATEWAY_BMS_HEALTH_MS       5000u
 #define BLE_GATEWAY_CONNECT_TIMEOUT_MS  3000u  
 #define BLE_GATEWAY_SESSION_TIMEOUT_MS  60000u
-#define BLE_GATEWAY_PAIR_WAIT_MS        3000u               // 等待BMS发起配对的窗口，超时视为无需配对
+#define BLE_GATEWAY_PAIR_WAIT_MS        5000u
 
 #define BLE_GATEWAY_FALLBACK_WAIT_MS    60000u
 #define BLE_GATEWAY_FALLBACK_TICK_MS    200u
@@ -55,7 +57,7 @@ enum ble_gateway_message_id
     BLE_GATEWAY_MSG_BMS_HEALTH = 10, // BMS 配置文件 / 首次接收存活超时
     BLE_GATEWAY_MSG_CONNECT_TIMEOUT = 11,  // 底层建连超时事件
     BLE_GATEWAY_MSG_SESSION_TIMEOUT = 12,  // 业务会话总预算超时
-    BLE_GATEWAY_MSG_PAIR_WAIT = 14,        // 配对等待窗口超时：BMS未发起配对则视为无需配对
+    BLE_GATEWAY_MSG_PAIR_WAIT = 14,        // 配对等待窗口超时(判定BMS无需配对)
 };
 
 
@@ -223,7 +225,8 @@ typedef struct
 
     Byte                    target_restart_pending;      // 目标更改生效中，正在重启底层扫描/连接的标志位
     Byte                    bms_rx_seen;                 // 当前从机已收到数据
-    Byte                    bms_secured;                 // BMS配对/加密已完成（防止SECURED事件重复触发服务发现）
+    Byte                    bms_secured;                 // 本连接是否已完成配对/加密(观察用)
+    Byte                    bms_service_started;         // BMS 服务(MTU/发现)是否已启动，避免重复启动
     Byte                    target_scan_fallback;        // 连不上时连任意规则里的蓝牙
     Byte                    target_discovery_suspended;
     gateway_fallback_t fallback;
@@ -1550,19 +1553,16 @@ static void ble_gateway_bms_peer_log(const char *event, const gateway_bms_peer_i
                 (unsigned)peer->address_type);
 }
 
-// 配对完成(或判定该BMS无需配对)后：交换MTU并发现FF00服务。幂等，重复触发自动忽略。
+// BMS 服务启动：MTU 交换 + 服务发现（配对成功或配对等待超时后调用，幂等）
 static void ble_gateway_bms_service_start(gateway_app_t *gateway)
 {
-    if ((gateway == 0) || (gateway->bms_secured != 0u) ||
-        (ble_gateway_bms_linked(gateway) == 0u))
+    if ((gateway == 0) || (gateway->bms_state != GATEWAY_BMS_LINKED))
         return;
 
-    gateway->bms_secured = 1u;
-    SysPlatform_TimerClear(BLE_GATEWAY_MSG_PAIR_WAIT);
-    NS_LOG_INFO("[BMS] service start (secured/pairless), discovering profile\r\n");
+    if (gateway->bms_service_started != 0u)
+        return;
 
-    /* 配对耗时不计入发现阶段预算：重新给完整的健康超时窗口 */
-    SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_HEALTH, BLE_GATEWAY_BMS_HEALTH_MS);
+    gateway->bms_service_started = 1u;
 
     if (control(gateway->bms, BLE_DEV_IOC_EXCHANGE_MTU, (void *)(uintptr_t)517) != CHAR_DEV_OK)
         NS_LOG_WARNING("[BMS] MTU exchange request failed\r\n");
@@ -1572,7 +1572,10 @@ static void ble_gateway_bms_service_start(gateway_app_t *gateway)
         NS_LOG_ERROR("[BMS] profile discovery start failed\r\n");
         ble_gateway_session_retry(gateway);
         (void)control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0);
+        return;
     }
+
+    SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_HEALTH, BLE_GATEWAY_BMS_HEALTH_MS);
 }
 
 //广播处理函数
@@ -1971,11 +1974,6 @@ static void ble_gateway_message_process(UInt16 message_id, void const *parameter
             break;
         }
 
-        case BLE_GATEWAY_MSG_PAIR_WAIT:
-            /* 等待窗口结束仍未配对：判定该BMS无需配对，直接进入服务发现 */
-            ble_gateway_bms_service_start(&s_gw_dev);
-            break;
-
         case BLE_GATEWAY_MSG_FALLBACK:
             ble_gateway_fallback_process(&s_gw_dev);
             /* A queued message after disabling must not restart the timer. */
@@ -2010,6 +2008,10 @@ static void ble_gateway_message_process(UInt16 message_id, void const *parameter
 
         case BLE_GATEWAY_MSG_BMS_POLL:
             ble_gateway_bms_poll_process(&s_gw_dev);
+            break;
+
+        case BLE_GATEWAY_MSG_PAIR_WAIT:
+            ble_gateway_bms_service_start(&s_gw_dev);
             break;
 
         case BLE_GATEWAY_MSG_BMS_HEALTH:
@@ -2220,36 +2222,18 @@ static void ble_gateway_port_event(void *user_data, device_t *device, ble_port_e
                 Proto_BmsDataInvalidate();
                 gateway->bms_rx_seen = 0;
                 gateway->bms_secured = 0;
+                gateway->bms_service_started = 0;
                 ble_gateway_bms_poll_stop();
                 ble_gateway_bms_health_stop();
 
-                /* BMS作为从机会主动发起SMP配对(手机连接时需点击配对)：
-                   本机不主动发起，只在底层自动应答配对；待BMS_SECURED事件
-                   (配对/加密完成)后再交换MTU、发现服务。5s健康超时兜底 */
-                SysPlatform_TimerSet(BLE_GATEWAY_MSG_BMS_HEALTH, BLE_GATEWAY_BMS_HEALTH_MS);
-                /* 启动配对等待窗口：窗口内BMS未发起配对，则超时后视为无需配对 */
+                // 开启配对等待窗口：窗口内 BMS 发起配对则应答；超时则视为无需配对的 BMS 直接启动服务
+                SysPlatform_TimerClear(BLE_GATEWAY_MSG_PAIR_WAIT);
                 SysPlatform_TimerSet(BLE_GATEWAY_MSG_PAIR_WAIT, BLE_GATEWAY_PAIR_WAIT_MS);
-                ble_gateway_bms_peer_log("connected, waiting pairing", &gateway->bms_peer);
+                ble_gateway_bms_peer_log("connected", &gateway->bms_peer);
             }
 
             break;
         }
-
-        case BLE_PORT_EVENT_BMS_SECURED:
-            /* 配对/加密完成（PAIR_SUCCEED与ENC_SUCCEED可能各上报一次，
-               由service_start幂等去重）：进入MTU交换与FF00服务发现 */
-            if ((endpoInt16 != BLE_ENDPOINT_BMS) ||
-                (gateway->target_restart_pending != 0u) ||
-                (gateway->target_discovery_suspended != 0u))
-                break;
-
-            ble_gateway_bms_service_start(gateway);
-            break;
-
-        case BLE_PORT_EVENT_BMS_PAIR_FAILED:
-            /* 底层ns_sec配对失败后会主动断开，LINK_DOWN流程负责重连扫描；健康超时兜底 */
-            NS_LOG_ERROR("[BMS] pairing failed, waiting for disconnect/reconnect\r\n");
-            break;
 
         case BLE_PORT_EVENT_LINK_DOWN:
             if (endpoInt16 >= BLE_ENDPOINT_COUNT)
@@ -2283,12 +2267,13 @@ static void ble_gateway_port_event(void *user_data, device_t *device, ble_port_e
             else
             {
                 ble_gateway_connect_timeout_stop();
-                SysPlatform_TimerClear(BLE_GATEWAY_MSG_PAIR_WAIT);
                 gateway->bms_rx_seen = 0;
                 gateway->bms_secured = 0;
+                gateway->bms_service_started = 0;
                 Proto_BmsDataInvalidate();
                 ble_gateway_bms_poll_stop();
                 ble_gateway_bms_health_stop();
+                SysPlatform_TimerClear(BLE_GATEWAY_MSG_PAIR_WAIT);
                 ble_gateway_bms_peer_log("disconnected", &gateway->bms_peer);
                 gateway->bms_peer.valid = 0;
                 if (gateway->fallback.returning != 0u)
@@ -2361,6 +2346,27 @@ static void ble_gateway_port_event(void *user_data, device_t *device, ble_port_e
                     control(gateway->bms, BLE_DEV_IOC_DISCONNECT, 0);
             }
 
+            break;
+
+        case BLE_PORT_EVENT_BMS_SECURED:
+            if (endpoInt16 == BLE_ENDPOINT_BMS)
+            {
+                gateway->bms_secured = 1u;
+                SysPlatform_TimerClear(BLE_GATEWAY_MSG_PAIR_WAIT);
+                YL1650_ShowPairError(0);   /* 配对成功，清错误显示 */
+                ble_gateway_bms_service_start(gateway);
+                NS_LOG_INFO("[BMS] pairing completed\r\n");
+            }
+            break;
+
+        case BLE_PORT_EVENT_BMS_PAIR_FAILED:
+            if (endpoInt16 == BLE_ENDPOINT_BMS)
+            {
+                gateway->bms_secured = 0u;
+                SysPlatform_TimerClear(BLE_GATEWAY_MSG_PAIR_WAIT);
+                YL1650_ShowPairError(ns_sec_get_pair_fail_reason());
+                NS_LOG_ERROR("[BMS] pairing failed; link will be dropped\r\n");
+            }
             break;
 
         case BLE_PORT_EVENT_SCAN_REPORT:

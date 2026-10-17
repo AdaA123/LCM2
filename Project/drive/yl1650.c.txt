@@ -448,6 +448,7 @@ void YL1650_SetIcon(Byte mask, Byte state)
 /* ================== 7. 定时任务 ================== */
 #define YL1650_WR_PERIOD_MS     800u    /* 写显示任务周期 */
 #define YL1650_RD_PERIOD_MS     800u    /* 读按键任务周期 */
+#define YL1650_VIEW_HOLD_TICKS  8u      /* 每个画面保持 8*400ms ≈ 3.2s */
 
 void wirteYL1650seg(void)
 {
@@ -455,10 +456,40 @@ void wirteYL1650seg(void)
         YL1650_WriteReg(g_seg_addr[i], g_seg_buf[i]);
 }
 
+/* ================== 7.1 配对失败错误码显示 ================== */
+/* 调试用：非0时优先显示 "E" + 2位十六进制配对失败原因码 */
+static Byte s_pair_err_reason = 0u;
+
+static Byte YL1650_HexSeg(Byte nibble)
+{
+    /* 共阴 0-9 A-F 段码（与 YL1650_SegTable 位定义一致） */
+    static const Byte hex_table[16] =
+    {
+        0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, /* 0-7 */
+        0x7F, 0x6F, 0x77, 0x7C, 0x39, 0x5E, 0x79, 0x71  /* 8-9 A-F */
+    };
+    return hex_table[nibble & 0x0Fu];
+}
+
+static void YL1650_RenderPairError(void)
+{
+    g_seg_buf[0] = 0x79;                                        /* 'E' */
+    g_seg_buf[1] = YL1650_HexSeg(s_pair_err_reason >> 4);      /* 高半字节 */
+    g_seg_buf[2] = YL1650_HexSeg(s_pair_err_reason & 0x0Fu);   /* 低半字节 */
+    g_seg_buf[3] = 0u;                                          /* 熄第4位及图标 */
+    wirteYL1650seg();
+}
+
+void YL1650_ShowPairError(Byte reason)
+{
+    s_pair_err_reason = reason;
+}
+
 Byte IconBuf[3] = {YL1650_ICON_PERCENT, YL1650_ICON_V, YL1650_ICON_BLE};
 
 static void YL1650_WriteTask(void)
 {
+    static Byte view_tick = 0u;
     Byte show_voltage;
     static Byte ready = 0;
     static Byte ble_linked = 1;
@@ -468,8 +499,18 @@ static void YL1650_WriteTask(void)
     if (My_Ble_BackgroundBusy() != 0u)
         return;
 
-    show_voltage = (Byte)(YL1650_DisplayModeGet() == YL1650_DISPLAY_MODE_VOLTAGE);
+    /* 配对失败错误码期间，优先显示错误码，不刷SOC/电压 */
+    if (s_pair_err_reason != 0u)
+    {
+        YL1650_RenderPairError();
+        return;
+    }
 
+    show_voltage = (view_tick >= YL1650_VIEW_HOLD_TICKS);
+
+    if (++view_tick >= (YL1650_VIEW_HOLD_TICKS + (YL1650_VIEW_HOLD_TICKS / 2)))
+        view_tick = 0u;
+	
     ready      = Proto_IsBatteryStatusReady();
     ble_linked = My_Ble_BmsReady();
 

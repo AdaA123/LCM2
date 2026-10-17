@@ -56,6 +56,7 @@ void YL1650_UpdateDisplay(uint16_t val, Byte show_dp); /* 按 XX.X 格式显示 */
 void YL1650_SetBatteryLevel(Byte percentage); /* 刷新电量格 (0~100) */
 void YL1650_SetIcon(Byte mask, Byte state);/* 控制独立图标 */
 void YL1650_SetBrightness(Byte brightness);   /* 设置亮度 (0~7) */
+void YL1650_ShowPairError(Byte reason);  /* 显示配对失败原因码 (0=清除，非0=显示 E+2位十六进制) */
 
 /* 按键接口 */
 Byte YL1650_ReadKey(void);                    /* 排队一次读操作并返回缓存值 */

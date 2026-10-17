@@ -91,7 +91,7 @@ enum sec_msg_id
 struct sec_msg_t
 {
     enum sec_msg_id msg_id;
-    uint8_t conidx;   /* 触发该消息的连接索引（无连接上下文时为0） */
+    uint8_t conidx;              /**< 事件关联的连接索引 (无连接上下文时填 0) */
     //income message
     union 
     {
@@ -221,6 +221,11 @@ int  ns_sec_bond_store_evt_handler(ke_msg_id_t const msgid, void *p_param, \
                                   ke_task_id_t const dest_id, ke_task_id_t const src_id);
 
 uint8_t ns_sec_get_iocap(void);
+
+/**
+ * @brief  获取最近一次配对失败的原因码（SMP reason），供调试显示
+ */
+uint8_t ns_sec_get_pair_fail_reason(void);
 
 void ns_bond_last_bonded_addr(struct gap_bdaddr *p_addr);
 void ns_bond_last_bonded_peer_id(struct gap_bdaddr *p_addr);

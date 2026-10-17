@@ -67,7 +67,6 @@
 #include "ns_ble.h"        // Application API Definition
 #include "ns_ble_task.h"
 #include "ns_sec.h"        // Application Security API Definition
-#include "ke_task.h"       // KE_IDX_GET
 
 
 #if (DISPLAY_SUPPORT)
@@ -146,7 +145,7 @@ static void ns_bond_db_init(void)
     peer_num = ns_bond_db_get_size();
     if(app_sec_env.sec_init.ns_sec_msg_handler)
     {
-        struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0u, {0}};
+        struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0, {0}};
         sec_msg.msg_id = NS_SEC_BOND_STATE;
         sec_msg.msg.peer_num = &peer_num;
         app_sec_env.sec_init.ns_sec_msg_handler(&sec_msg); 
@@ -390,6 +389,14 @@ uint8_t ns_sec_get_iocap(void)
     return app_sec_env.sec_init.pairing_feat.iocap;
 }
 
+/* 最近一次配对失败原因码（SMP reason），供应用层读取显示 */
+static uint8_t s_pair_fail_reason = 0u;
+
+uint8_t ns_sec_get_pair_fail_reason(void)
+{
+    return s_pair_fail_reason;
+}
+
 void ns_sec_send_security_req(uint8_t conidx)
 {
     // Send security request
@@ -497,20 +504,6 @@ void ns_sec_pincode_respond(uint8_t conidx, uint32_t pincode)
     ke_msg_send(cfm);
 }
 
-/**
- * @brief 断开指定连接（ns_ble_disconnect依赖app_env.conidx，多连接下可能指向手机链路）
- */
-static void ns_sec_disconnect_conidx(uint8_t conidx)
-{
-    struct gapc_disconnect_cmd *p_cmd = KE_MSG_ALLOC(GAPC_DISCONNECT_CMD,
-                                                     KE_BUILD_ID(TASK_GAPC, conidx), TASK_APP,
-                                                     gapc_disconnect_cmd);
-    p_cmd->operation = GAPC_DISCONNECT;
-    p_cmd->reason    = CO_ERROR_REMOTE_USER_TERM_CON;
-
-    ke_msg_send(p_cmd);
-}
-
 static int gapc_bond_req_ind_handler(ke_msg_id_t const msgid,
                                      struct gapc_bond_req_ind const *param,
                                      ke_task_id_t const dest_id,
@@ -530,6 +523,7 @@ static int gapc_bond_req_ind_handler(ke_msg_id_t const msgid,
         case (GAPC_PAIRING_REQ):
         {
             cfm->request = GAPC_PAIRING_RSP;
+            NS_LOG_DEBUG("peer auth_req=0x%02x\r\n", param->data.auth_req);
            
             cfm->accept  = true;
             
@@ -543,7 +537,7 @@ static int gapc_bond_req_ind_handler(ke_msg_id_t const msgid,
             
             if(app_sec_env.sec_init.ns_sec_msg_handler)
             {
-                struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0u, {0}};
+                struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0, {0}};
                 sec_msg.msg_id = NS_SEC_PAIRING_RSP;
                 sec_msg.conidx = KE_IDX_GET(src_id);
                 sec_msg.msg.cfm = cfm;
@@ -579,7 +573,7 @@ static int gapc_bond_req_ind_handler(ke_msg_id_t const msgid,
             }
             cfm->data.ltk.key_size = SEC_PARAM_KEY_SIZE;
             
-            if (app_env.conn_env[app_env.conidx].role == ROLE_SLAVE)
+            if (app_env.conn_env[KE_IDX_GET(src_id)].role == ROLE_SLAVE)
             {
                 memcpy(&app_sec_bond_data.ltk.key, &cfm->data.ltk.ltk.key, sizeof(struct gapc_ltk));
                 memcpy(&app_sec_bond_data.rand_nb, &cfm->data.ltk.randnb, sizeof(rand_nb_t));
@@ -622,7 +616,7 @@ static int gapc_bond_req_ind_handler(ke_msg_id_t const msgid,
                 }
                 if(app_sec_env.sec_init.ns_sec_msg_handler)
                 {
-                    struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0u, {0}};
+                    struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0, {0}};
                     sec_msg.msg_id = NS_SEC_PINCODE_DISPLAY;
                     sec_msg.conidx = KE_IDX_GET(src_id);
                     sec_msg.msg.pincode = &pin_code;
@@ -641,7 +635,7 @@ static int gapc_bond_req_ind_handler(ke_msg_id_t const msgid,
             {
                 if(app_sec_env.sec_init.ns_sec_msg_handler)
                 {
-                    struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0u, {0}};
+                    struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0, {0}} ;
                     sec_msg.msg_id = NS_SEC_PINCODE_ENTER;
                     sec_msg.conidx = KE_IDX_GET(src_id);
                     app_sec_env.sec_init.ns_sec_msg_handler(&sec_msg); 
@@ -719,7 +713,7 @@ static int gapc_bond_ind_handler(ke_msg_id_t const msgid,
             }
             if(app_sec_env.sec_init.ns_sec_msg_handler)
             {
-                struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0u, {0}};
+                struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0, {0}};
                 sec_msg.msg_id = NS_SEC_PAIR_SUCCEED;
                 sec_msg.conidx = KE_IDX_GET(src_id);
                 app_sec_env.sec_init.ns_sec_msg_handler(&sec_msg); 
@@ -729,13 +723,19 @@ static int gapc_bond_ind_handler(ke_msg_id_t const msgid,
         
         case (GAPC_PAIRING_FAILED):
         {
-            NS_LOG_DEBUG("GAPC_PAIRING_FAILED\r\n");
+            NS_LOG_DEBUG("GAPC_PAIRING_FAILED, reason=0x%02x\r\n", param->data.reason);
+            s_pair_fail_reason = param->data.reason;
             app_sec_bond_data.auth = GAP_AUTH_NONE;
-            /* 只断开配对失败的这条连接（原ns_ble_disconnect会误断手机链路） */
-            ns_sec_disconnect_conidx(KE_IDX_GET(src_id));
+            // 精确断开触发配对失败的那条链路，避免多连接时误断手机链路
+            struct gapc_disconnect_cmd *p_cmd = KE_MSG_ALLOC(GAPC_DISCONNECT_CMD,
+                                                             src_id, TASK_APP,
+                                                             gapc_disconnect_cmd);
+            p_cmd->operation = GAPC_DISCONNECT;
+            p_cmd->reason    = CO_ERROR_AUTH_FAILURE;
+            ke_msg_send(p_cmd);
             if(app_sec_env.sec_init.ns_sec_msg_handler)
             {
-                struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0u, {0}};
+                struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0, {0}};
                 sec_msg.msg_id = NS_SEC_PAIR_FAILED;
                 sec_msg.conidx = KE_IDX_GET(src_id);
                 app_sec_env.sec_init.ns_sec_msg_handler(&sec_msg); 
@@ -753,7 +753,7 @@ static int gapc_bond_ind_handler(ke_msg_id_t const msgid,
         case (GAPC_LTK_EXCH) :
         {
             #if (BLE_APP_SEC_CON == 0)
-            if (app_env.conn_env[app_env.conidx].role == ROLE_MASTER )
+            if (app_env.conn_env[KE_IDX_GET(src_id)].role == ROLE_MASTER )
             #endif
             {
                 memcpy(&app_sec_bond_data.ltk.key, &param->data.ltk.ltk.key, sizeof(struct gapc_ltk));
@@ -857,7 +857,7 @@ static int gapc_encrypt_req_ind_handler(ke_msg_id_t const msgid,
         NS_LOG_DEBUG("Not found\r\n");
         if(app_sec_env.sec_init.ns_sec_msg_handler)
         {
-            struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0u, {0}};
+            struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0, {0}};
             sec_msg.msg_id = NS_SEC_LTK_MISSING;
             sec_msg.conidx = KE_IDX_GET(src_id);
             app_sec_env.sec_init.ns_sec_msg_handler(&sec_msg); 
@@ -878,7 +878,7 @@ static int gapc_encrypt_req_ind_handler(ke_msg_id_t const msgid,
     else{
         if(app_sec_env.sec_init.ns_sec_msg_handler)
         {
-            struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0u, {0}};
+            struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0, {0}};
             sec_msg.msg_id = NS_SEC_LTK_FOUND;
             sec_msg.conidx = KE_IDX_GET(src_id);
             app_sec_env.sec_init.ns_sec_msg_handler(&sec_msg);
@@ -899,7 +899,7 @@ static int gapc_encrypt_ind_handler(ke_msg_id_t const msgid,
     NS_LOG_DEBUG("%s,lvl:%d\r\n",__func__,param->pairing_lvl);
     if(app_sec_env.sec_init.ns_sec_msg_handler)
     {
-        struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0u, {0}};
+        struct sec_msg_t sec_msg = {NS_SEC_NULL_MSG, 0, {0}};
         sec_msg.msg_id = NS_SEC_ENC_SUCCEED;
         sec_msg.conidx = KE_IDX_GET(src_id);
         app_sec_env.sec_init.ns_sec_msg_handler(&sec_msg);
@@ -909,22 +909,19 @@ static int gapc_encrypt_ind_handler(ke_msg_id_t const msgid,
 
 
 
-/**
- * @brief 从机(peripheral)主动发起安全请求(SMP Security Request)时的应答：
- *        中央(central)侧必须发起bond配对流程，否则对端会判定超时并断开
- */
 static int gapc_security_ind_handler(ke_msg_id_t const msgid,
                                      struct gapc_security_ind const *param,
                                      ke_task_id_t const dest_id,
                                      ke_task_id_t const src_id)
 {
-    NS_LOG_DEBUG("%s: peer requests security(auth=%u), start bond\r\n", __func__, param->auth);
-
-    // 以发起bond配对作为应答，后续Pairing Response/TK/LTK交换由各handler自动完成
+    NS_LOG_DEBUG("%s\r\n",__func__);
+    NS_LOG_DEBUG("sec_req auth=0x%02x\r\n", param->auth);
+    // 从机(BMS)发起 Security Request，作为主机(central)应答并启动配对
     ns_sec_send_bond_start(KE_IDX_GET(src_id));
-
     return (KE_MSG_CONSUMED);
 }
+
+
 
 static int app_sec_msg_dflt_handler(ke_msg_id_t const msgid,
                                     void *param,
@@ -1022,12 +1019,12 @@ const struct ke_msg_handler app_sec_msg_handler_list[] =
 
     {GAPC_BOND_REQ_IND,       (ke_msg_func_t)gapc_bond_req_ind_handler},
     {GAPC_BOND_IND,           (ke_msg_func_t)gapc_bond_ind_handler},
+    {GAPC_SECURITY_IND,       (ke_msg_func_t)gapc_security_ind_handler},
 
     {GAPC_ENCRYPT_REQ_IND,    (ke_msg_func_t)gapc_encrypt_req_ind_handler},
     {GAPC_ENCRYPT_IND,        (ke_msg_func_t)gapc_encrypt_ind_handler},
-
-    // 从机主动发起的安全请求：中央应答bond
-    {GAPC_SECURITY_IND,       (ke_msg_func_t)gapc_security_ind_handler},
+    
+    
 };
 
 const struct app_subtask_handlers app_sec_handlers = {&app_sec_msg_handler_list[0], ARRAY_LEN(app_sec_msg_handler_list)};

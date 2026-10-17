@@ -11,7 +11,7 @@
 #define LED_GPIO_DRIVE_MASK             0x00000003u
 #define LED_GPIO_DRIVE_4MA              0x00000002u
 #define LED_ACTIVITY_TICKS              4u
-#define LED_CONNECTION_FAILED_TICKS     40u
+#define LED_CONNECTION_FAILED_TICKS     400u
 #define LED_OVERRIDE_NONE               LED_STATE_COUNT
 
 typedef struct
