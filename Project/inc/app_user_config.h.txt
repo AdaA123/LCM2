@@ -107,7 +107,7 @@
 #define SEC_PARAM_KEYPRESS                  0                                           /**< Keypress notifications not enabled. */
 #define SEC_PARAM_IKEY                      GAP_KDIST_NONE                              /**< Initiator Key Distribution. (@enum gap_kdist) */
 #define SEC_PARAM_RKEY                      GAP_KDIST_ENCKEY                            /**< Responder Key Distribution. (@enum gap_kdist) */
-#define SEC_PARAM_SEC_MODE_LEVEL            GAP_NO_SEC                                  /**< Device security requirements (minimum security level). (@enum see gap_sec_req) */
+#define SEC_PARAM_SEC_MODE_LEVEL            GAP_SEC1_NOAUTH_PAIR_ENC           			/**< Device security requirements (minimum security level). (@enum see gap_sec_req) */
 
 /* bond conifg */
 #define MAX_BOND_PEER                       5
